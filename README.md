@@ -6,7 +6,7 @@ No-downtime app deployment on bare metal. One binary. No containers. No bullshit
 
 Buy a server. Install Vela. Deploy your apps from your laptop over SSH. That's it.
 
-No Docker. No Kubernetes. No YAML-driven orbital complexity. No $1k/month for two apps that nobody uses yet.
+No Docker. No Kubernetes. No YAML-driven orbital complexity. No $500/month for an app that nobody uses yet.
 
 ## What It Does
 

@@ -140,6 +140,7 @@ memory = "512M"
 - [Deploy Lifecycle](docs/deploy-lifecycle.md)
 - [Architecture](docs/architecture.md)
 - [Elixir/Phoenix Guide](docs/elixir-phoenix.md)
+- [Cloudflare Integration](docs/cloudflare.md)
 
 ## Status
 

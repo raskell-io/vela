@@ -29,7 +29,7 @@ Vela uploads your binary (or BEAM release), starts it on a fresh port, runs a he
 │  Vela                                       │
 │  ├── Reverse proxy (:80/:443, auto-TLS)     │
 │  ├── Process manager (start, health, swap)  │
-│  └── SQLite state                           │
+│  └── State manager                          │
 │                                             │
 │  Apps                                       │
 │  ├── next.ai         → :10001               │

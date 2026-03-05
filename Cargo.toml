@@ -27,9 +27,6 @@ rustls-pemfile = "2"
 # HTTP client (for health checks and proxy forwarding)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
-# State
-rusqlite = { version = "0.34", features = ["bundled"] }
-
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 toml = "1.0"

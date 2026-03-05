@@ -9,7 +9,7 @@ Vela is a deployment tool for people who own their servers. You install `vela` o
 1. **One binary, two modes** — `vela serve` on the server, `vela deploy` from your laptop. Same binary.
 2. **No containers** — Apps run as isolated processes with Linux namespaces, cgroups v2, and systemd sandboxing. Ship binaries or BEAM releases, not images.
 3. **Zero downtime by default** — Blue-green deploys with health checks. Traffic switches only after the new instance is healthy.
-4. **SQLite-aware** — Persistent data directories survive deploys. Sequential swap for write-heavy SQLite apps to avoid contention.
+4. **SQLite-aware** — Persistent data directories survive deploys. Sequential swap for write-heavy SQLite apps to avoid contention. No SQLite for Vela's own state — pure filesystem.
 5. **Automatic TLS** — Embedded reverse proxy with Let's Encrypt. No nginx, no Caddy, no manual cert management.
 6. **SSH is the control plane** — No custom auth, no tokens, no API keys. If you can SSH in, you can deploy.
 
@@ -29,9 +29,9 @@ Vela is a deployment tool for people who own their servers. You install `vela` o
 │  └──────────────┘  └────────────────────────────┘   │
 │                                                     │
 │  ┌──────────────┐  ┌────────────────────────────┐   │
-│  │  Deploy      │  │  State                      │   │
-│  │  Receiver    │  │  /var/vela/vela.db (SQLite) │   │
-│  │  (SSH)       │  │  /var/vela/apps/            │   │
+│  │  Deploy      │  │  State (filesystem)         │   │
+│  │  Receiver    │  │  /var/vela/apps/            │   │
+│  │  (SSH)       │  │  app.toml + secrets.env     │   │
 │  └──────────────┘  └────────────────────────────┘   │
 └─────────────────────────────────────────────────────┘
 
@@ -66,12 +66,10 @@ Client commands SSH into the server and run `vela` subcommands there.
 
 ```
 /var/vela/
-├── vela.db                    # Server state (SQLite)
-├── secrets/                   # Encrypted env files per app
-│   └── cyanea.env
 ├── apps/
 │   └── cyanea/
-│       ├── app.toml           # Server-side app config (from Vela.toml)
+│       ├── app.toml           # App config (name, domain, type, strategy)
+│       ├── secrets.env        # KEY=VALUE, mode 0600
 │       ├── data/              # Persistent across deploys
 │       │   └── cyanea.db      # SQLite databases live here
 │       ├── releases/
@@ -112,7 +110,7 @@ memory = "512M"
 | `src/server/proxy.rs` | Pingora-based reverse proxy with auto-TLS |
 | `src/server/process.rs` | App lifecycle: start, stop, health check, swap |
 | `src/server/deploy.rs` | Receive and activate deployments |
-| `src/server/state.rs` | SQLite state (apps, releases, config) |
+| `src/server/state.rs` | Filesystem-backed state (apps, releases, secrets) |
 | `src/client/` | Client commands: deploy, status, logs |
 | `src/client/ssh.rs` | SSH transport (upload artifacts, run remote commands) |
 | `src/config.rs` | Vela.toml parsing and server config |
@@ -147,7 +145,7 @@ cargo run -- deploy --manifest Vela.toml ./target/release/myapp
 - `pingora` — Reverse proxy (Cloudflare)
 - `tokio` — Async runtime
 - `clap` — CLI parsing
-- `rusqlite` — Server state
+- `toml` — Config and state serialization
 - `tracing` — Structured logging
 - `thiserror` / `anyhow` — Error handling
 - `serde` / `toml` — Config parsing

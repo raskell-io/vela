@@ -14,7 +14,7 @@ use crate::cli::{
     AppsArgs, InternalDeployArgs, InternalRollbackArgs, InternalSecretAction, InternalSecretArgs,
     ServeArgs,
 };
-use crate::config::{AppType, DeployStrategy, Manifest, ServerConfig};
+use crate::config::{AppType, Manifest, ServerConfig};
 use crate::health::HealthCheck;
 
 /// Start the vela server daemon (proxy + process manager).
@@ -109,10 +109,8 @@ async fn restore_apps(
             .await
         {
             Ok(port) => {
-                // Promote directly to active (no pending/swap for restore)
                 pm.promote_pending_to_active(&app.name);
                 route_table.set(&app.domain, port);
-                state.update_app_port(&app.name, port)?;
                 tracing::info!(app = %app.name, port, release = %release_id, "restored app");
             }
             Err(e) => {
@@ -210,9 +208,6 @@ pub fn internal_deploy(args: InternalDeployArgs) -> Result<()> {
     let release_id = deploy::generate_release_id();
     let release_dir = deploy::extract_release(&config.apps_dir(), app_name, &release_id, tarball)?;
 
-    // Record release in DB
-    state.create_release(app_name, &release_id)?;
-
     // Ensure data directory exists
     let data_dir = deploy::ensure_data_dir(&config.apps_dir(), app_name)?;
 
@@ -277,8 +272,8 @@ pub fn internal_deploy(args: InternalDeployArgs) -> Result<()> {
                 Err(e) => {
                     eprintln!("  health check failed: {e}");
                     pm.abort_pending(app_name).await?;
-                    state.fail_release(app_name, &release_id)?;
-                    // Clean up tarball
+                    // Clean up failed release directory and tarball
+                    let _ = std::fs::remove_dir_all(&release_dir);
                     let _ = std::fs::remove_file(tarball);
                     anyhow::bail!("deploy failed: health check did not pass");
                 }
@@ -289,10 +284,8 @@ pub fn internal_deploy(args: InternalDeployArgs) -> Result<()> {
             eprintln!("  no health check configured, assuming healthy");
         }
 
-        // Activate: update symlink, DB, swap process
+        // Activate: update symlink
         deploy::link_current(&config.apps_dir(), app_name, &release_id)?;
-        state.activate_release(app_name, &release_id)?;
-        state.update_app_port(app_name, port)?;
 
         // For sequential: old was already stopped. For blue-green: we'd swap here.
         // Since _deploy runs as a one-shot (not inside the daemon), we promote directly.
@@ -373,8 +366,6 @@ pub fn internal_rollback(args: InternalRollbackArgs) -> Result<()> {
         }
 
         deploy::link_current(&config.apps_dir(), app_name, &prev_release)?;
-        state.activate_release(app_name, &prev_release)?;
-        state.update_app_port(app_name, port)?;
         pm.promote_pending_to_active(app_name);
 
         eprintln!("rolled back {app_name} to {prev_release} on port {port}");

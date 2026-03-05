@@ -1,12 +1,24 @@
-use anyhow::Result;
-use rusqlite::Connection;
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 use crate::config::ServerConfig;
 
-pub struct ServerState {
-    db: Connection,
+/// App configuration stored as app.toml inside each app directory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppConfig {
+    pub name: String,
+    pub domain: String,
+    pub app_type: String,
+    pub binary_name: Option<String>,
+    pub health_path: Option<String>,
+    pub deploy_strategy: String,
+    pub drain_seconds: u32,
 }
 
+/// Runtime info derived from the filesystem.
 #[derive(Debug, Clone)]
 pub struct AppInfo {
     pub name: String,
@@ -15,95 +27,83 @@ pub struct AppInfo {
     pub status: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct AppRecord {
-    pub name: String,
-    pub domain: String,
-    pub app_type: String,
-    pub binary_name: Option<String>,
-    pub health_path: Option<String>,
-    pub deploy_strategy: String,
-    pub drain_seconds: u32,
-    pub port: Option<u16>,
+/// Filesystem-backed server state.
+///
+/// All state is stored as plain files under `data_dir`:
+/// ```text
+/// /var/vela/apps/<name>/
+/// ├── app.toml          # AppConfig
+/// ├── secrets.env       # KEY=VALUE per line
+/// ├── data/             # persistent app data
+/// ├── releases/
+/// │   ├── 20260305-001/
+/// │   └── 20260305-002/
+/// └── current -> releases/20260305-002
+/// ```
+pub struct ServerState {
+    apps_dir: PathBuf,
 }
 
 impl ServerState {
     pub fn open(config: &ServerConfig) -> Result<Self> {
-        let db_path = config.db_path();
-
-        // Ensure parent directory exists
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let db = Connection::open(&db_path)?;
-        let state = Self { db };
-        state.migrate()?;
-        Ok(state)
+        let apps_dir = config.apps_dir();
+        std::fs::create_dir_all(&apps_dir)?;
+        Ok(Self { apps_dir })
     }
 
-    fn migrate(&self) -> Result<()> {
-        self.db.execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS apps (
-                name            TEXT PRIMARY KEY,
-                domain          TEXT NOT NULL UNIQUE,
-                app_type        TEXT NOT NULL DEFAULT 'binary',
-                binary_name     TEXT,
-                health_path     TEXT,
-                deploy_strategy TEXT NOT NULL DEFAULT 'blue-green',
-                drain_seconds   INTEGER NOT NULL DEFAULT 5,
-                port            INTEGER,
-                created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-                updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
-            );
-
-            CREATE TABLE IF NOT EXISTS releases (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                app_name        TEXT NOT NULL REFERENCES apps(name),
-                release_id      TEXT NOT NULL,
-                status          TEXT NOT NULL DEFAULT 'pending',
-                created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-                activated_at    TEXT,
-                UNIQUE(app_name, release_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS secrets (
-                app_name        TEXT NOT NULL REFERENCES apps(name),
-                key             TEXT NOT NULL,
-                value           TEXT NOT NULL,
-                updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
-                PRIMARY KEY (app_name, key)
-            );
-            ",
-        )?;
-        Ok(())
+    fn app_dir(&self, name: &str) -> PathBuf {
+        self.apps_dir.join(name)
     }
+
+    fn app_config_path(&self, name: &str) -> PathBuf {
+        self.app_dir(name).join("app.toml")
+    }
+
+    fn secrets_path(&self, name: &str) -> PathBuf {
+        self.app_dir(name).join("secrets.env")
+    }
+
+    // -----------------------------------------------------------------------
+    // Apps
+    // -----------------------------------------------------------------------
 
     pub fn list_apps(&self) -> Result<Vec<AppInfo>> {
-        let mut stmt = self.db.prepare(
-            "
-            SELECT a.name, a.domain,
-                   COALESCE(r.release_id, 'none') as current_release,
-                   COALESCE(r.status, 'no-release') as status
-            FROM apps a
-            LEFT JOIN releases r ON r.app_name = a.name
-                AND r.status = 'active'
-            ORDER BY a.name
-            ",
-        )?;
+        let mut apps = Vec::new();
 
-        let apps = stmt
-            .query_map([], |row| {
-                Ok(AppInfo {
-                    name: row.get(0)?,
-                    domain: row.get(1)?,
-                    current_release: row.get(2)?,
-                    status: row.get(3)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+        let entries = match std::fs::read_dir(&self.apps_dir) {
+            Ok(e) => e,
+            Err(_) => return Ok(apps),
+        };
 
+        for entry in entries.flatten() {
+            if !entry.path().is_dir() {
+                continue;
+            }
+
+            let name = entry.file_name().to_string_lossy().to_string();
+            let config_path = self.app_config_path(&name);
+
+            if !config_path.exists() {
+                continue;
+            }
+
+            let app_config = self.load_app_config(&name)?;
+            let current_release = self.get_active_release(&name)?;
+            let status = if current_release.is_some() {
+                "active"
+            } else {
+                "no-release"
+            };
+
+            apps.push(AppInfo {
+                name,
+                domain: app_config.domain,
+                current_release: current_release.unwrap_or_else(|| "none".into()),
+                status: status.into(),
+            });
+        }
+
+        apps.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(apps)
     }
 
@@ -117,170 +117,202 @@ impl ServerState {
         deploy_strategy: &str,
         drain_seconds: u32,
     ) -> Result<()> {
-        self.db.execute(
-            "INSERT INTO apps (name, domain, app_type, binary_name, health_path, deploy_strategy, drain_seconds)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(name) DO UPDATE SET
-                domain = excluded.domain,
-                app_type = excluded.app_type,
-                binary_name = excluded.binary_name,
-                health_path = excluded.health_path,
-                deploy_strategy = excluded.deploy_strategy,
-                drain_seconds = excluded.drain_seconds,
-                updated_at = datetime('now')",
-            rusqlite::params![name, domain, app_type, binary_name, health_path, deploy_strategy, drain_seconds],
-        )?;
+        let app_dir = self.app_dir(name);
+        std::fs::create_dir_all(&app_dir)?;
+
+        let config = AppConfig {
+            name: name.into(),
+            domain: domain.into(),
+            app_type: app_type.into(),
+            binary_name: binary_name.map(Into::into),
+            health_path: health_path.map(Into::into),
+            deploy_strategy: deploy_strategy.into(),
+            drain_seconds,
+        };
+
+        let toml_str = toml::to_string_pretty(&config).context("failed to serialize app config")?;
+        std::fs::write(self.app_config_path(name), toml_str)?;
+
         Ok(())
     }
 
-    pub fn create_release(&self, app_name: &str, release_id: &str) -> Result<()> {
-        self.db.execute(
-            "INSERT INTO releases (app_name, release_id, status) VALUES (?1, ?2, 'pending')",
-            rusqlite::params![app_name, release_id],
-        )?;
-        Ok(())
+    pub fn get_app(&self, name: &str) -> Result<Option<AppConfig>> {
+        let path = self.app_config_path(name);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let config = self.load_app_config(name)?;
+        Ok(Some(config))
     }
 
-    pub fn activate_release(&self, app_name: &str, release_id: &str) -> Result<()> {
-        // Deactivate current active release
-        self.db.execute(
-            "UPDATE releases SET status = 'inactive' WHERE app_name = ?1 AND status = 'active'",
-            rusqlite::params![app_name],
-        )?;
-        // Activate new release
-        self.db.execute(
-            "UPDATE releases SET status = 'active', activated_at = datetime('now')
-             WHERE app_name = ?1 AND release_id = ?2",
-            rusqlite::params![app_name, release_id],
-        )?;
-        Ok(())
+    fn load_app_config(&self, name: &str) -> Result<AppConfig> {
+        let path = self.app_config_path(name);
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let config: AppConfig = toml::from_str(&content)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        Ok(config)
     }
 
-    pub fn fail_release(&self, app_name: &str, release_id: &str) -> Result<()> {
-        self.db.execute(
-            "UPDATE releases SET status = 'failed' WHERE app_name = ?1 AND release_id = ?2",
-            rusqlite::params![app_name, release_id],
-        )?;
-        Ok(())
+    pub fn list_active_apps(&self) -> Result<Vec<AppConfig>> {
+        let mut active = Vec::new();
+
+        let entries = match std::fs::read_dir(&self.apps_dir) {
+            Ok(e) => e,
+            Err(_) => return Ok(active),
+        };
+
+        for entry in entries.flatten() {
+            if !entry.path().is_dir() {
+                continue;
+            }
+
+            let name = entry.file_name().to_string_lossy().to_string();
+            let current = self.app_dir(&name).join("current");
+
+            // Only restore apps that have a current symlink (i.e. have been deployed)
+            if !current.is_symlink() {
+                continue;
+            }
+
+            if let Ok(config) = self.load_app_config(&name) {
+                active.push(config);
+            }
+        }
+
+        Ok(active)
     }
+
+    // -----------------------------------------------------------------------
+    // Releases
+    // -----------------------------------------------------------------------
 
     pub fn get_active_release(&self, app_name: &str) -> Result<Option<String>> {
-        let result = self.db.query_row(
-            "SELECT release_id FROM releases WHERE app_name = ?1 AND status = 'active'",
-            rusqlite::params![app_name],
-            |row| row.get(0),
-        );
-        match result {
-            Ok(id) => Ok(Some(id)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
+        let current = self.app_dir(app_name).join("current");
+        if !current.is_symlink() {
+            return Ok(None);
         }
+
+        let target = std::fs::read_link(&current)?;
+        let release_id = target
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        if release_id.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(release_id))
     }
 
     pub fn get_previous_release(&self, app_name: &str) -> Result<Option<String>> {
-        let result = self.db.query_row(
-            "SELECT release_id FROM releases
-             WHERE app_name = ?1 AND status = 'inactive'
-             ORDER BY id DESC LIMIT 1",
-            rusqlite::params![app_name],
-            |row| row.get(0),
-        );
-        match result {
-            Ok(id) => Ok(Some(id)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
+        let active = self.get_active_release(app_name)?;
+        let releases = self.list_releases(app_name)?;
+
+        match active {
+            Some(current) => {
+                // Find the release before the current one
+                let pos = releases.iter().position(|r| r == &current);
+                match pos {
+                    Some(i) if i > 0 => Ok(Some(releases[i - 1].clone())),
+                    _ => Ok(None),
+                }
+            }
+            None => {
+                // No active release — return the latest
+                Ok(releases.last().cloned())
+            }
         }
     }
 
+    fn list_releases(&self, app_name: &str) -> Result<Vec<String>> {
+        let releases_dir = self.app_dir(app_name).join("releases");
+        if !releases_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut entries: Vec<String> = std::fs::read_dir(&releases_dir)?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+
+        // Sort chronologically (timestamp-based names sort lexicographically)
+        entries.sort();
+        Ok(entries)
+    }
+
+    // -----------------------------------------------------------------------
+    // Secrets
+    // -----------------------------------------------------------------------
+
     pub fn set_secret(&self, app_name: &str, key: &str, value: &str) -> Result<()> {
-        self.db.execute(
-            "INSERT INTO secrets (app_name, key, value)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(app_name, key) DO UPDATE SET
-                value = excluded.value,
-                updated_at = datetime('now')",
-            rusqlite::params![app_name, key, value],
-        )?;
-        Ok(())
+        let mut secrets = self.load_secrets(app_name)?;
+        secrets.insert(key.to_string(), value.to_string());
+        self.save_secrets(app_name, &secrets)
     }
 
     pub fn get_secrets(&self, app_name: &str) -> Result<Vec<(String, String)>> {
-        let mut stmt = self
-            .db
-            .prepare("SELECT key, value FROM secrets WHERE app_name = ?1 ORDER BY key")?;
-        let secrets = stmt
-            .query_map(rusqlite::params![app_name], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(secrets)
-    }
-
-    pub fn get_app(&self, name: &str) -> Result<Option<AppRecord>> {
-        let result = self.db.query_row(
-            "SELECT name, domain, app_type, binary_name, health_path, deploy_strategy, drain_seconds, port
-             FROM apps WHERE name = ?1",
-            rusqlite::params![name],
-            |row| {
-                Ok(AppRecord {
-                    name: row.get(0)?,
-                    domain: row.get(1)?,
-                    app_type: row.get(2)?,
-                    binary_name: row.get(3)?,
-                    health_path: row.get(4)?,
-                    deploy_strategy: row.get(5)?,
-                    drain_seconds: row.get(6)?,
-                    port: row.get::<_, Option<i64>>(7)?.map(|p| p as u16),
-                })
-            },
-        );
-        match result {
-            Ok(app) => Ok(Some(app)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    pub fn update_app_port(&self, name: &str, port: u16) -> Result<()> {
-        self.db.execute(
-            "UPDATE apps SET port = ?2, updated_at = datetime('now') WHERE name = ?1",
-            rusqlite::params![name, port as i64],
-        )?;
-        Ok(())
-    }
-
-    pub fn list_active_apps(&self) -> Result<Vec<AppRecord>> {
-        let mut stmt = self.db.prepare(
-            "SELECT a.name, a.domain, a.app_type, a.binary_name, a.health_path,
-                    a.deploy_strategy, a.drain_seconds, a.port
-             FROM apps a
-             JOIN releases r ON r.app_name = a.name AND r.status = 'active'
-             WHERE a.port IS NOT NULL
-             ORDER BY a.name",
-        )?;
-        let apps = stmt
-            .query_map([], |row| {
-                Ok(AppRecord {
-                    name: row.get(0)?,
-                    domain: row.get(1)?,
-                    app_type: row.get(2)?,
-                    binary_name: row.get(3)?,
-                    health_path: row.get(4)?,
-                    deploy_strategy: row.get(5)?,
-                    drain_seconds: row.get(6)?,
-                    port: row.get::<_, Option<i64>>(7)?.map(|p| p as u16),
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(apps)
+        let secrets = self.load_secrets(app_name)?;
+        let mut pairs: Vec<(String, String)> = secrets.into_iter().collect();
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(pairs)
     }
 
     pub fn remove_secret(&self, app_name: &str, key: &str) -> Result<bool> {
-        let changed = self.db.execute(
-            "DELETE FROM secrets WHERE app_name = ?1 AND key = ?2",
-            rusqlite::params![app_name, key],
-        )?;
-        Ok(changed > 0)
+        let mut secrets = self.load_secrets(app_name)?;
+        let removed = secrets.remove(key).is_some();
+        if removed {
+            self.save_secrets(app_name, &secrets)?;
+        }
+        Ok(removed)
+    }
+
+    fn load_secrets(&self, app_name: &str) -> Result<HashMap<String, String>> {
+        let path = self.secrets_path(app_name);
+        if !path.exists() {
+            return Ok(HashMap::new());
+        }
+
+        let content = std::fs::read_to_string(&path)?;
+        let mut secrets = HashMap::new();
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once('=') {
+                secrets.insert(key.trim().to_string(), value.trim().to_string());
+            }
+        }
+
+        Ok(secrets)
+    }
+
+    fn save_secrets(&self, app_name: &str, secrets: &HashMap<String, String>) -> Result<()> {
+        let path = self.secrets_path(app_name);
+
+        // Ensure the app directory exists
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let mut lines: Vec<String> = secrets.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        lines.sort();
+
+        let content = lines.join("\n") + "\n";
+        std::fs::write(&path, content)?;
+
+        // Restrict permissions (secrets file)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
+
+        Ok(())
     }
 }
 
@@ -288,26 +320,26 @@ impl ServerState {
 mod tests {
     use super::*;
 
-    fn test_config() -> ServerConfig {
+    fn test_state() -> (tempfile::TempDir, ServerState) {
         let dir = tempfile::tempdir().unwrap();
-        ServerConfig {
-            data_dir: dir.into_path(),
+        let config = ServerConfig {
+            data_dir: dir.path().to_path_buf(),
             ..Default::default()
-        }
+        };
+        let state = ServerState::open(&config).unwrap();
+        (dir, state)
     }
 
     #[test]
-    fn open_and_migrate() {
-        let config = test_config();
-        let state = ServerState::open(&config).unwrap();
+    fn empty_apps() {
+        let (_dir, state) = test_state();
         let apps = state.list_apps().unwrap();
         assert!(apps.is_empty());
     }
 
     #[test]
     fn register_and_list_app() {
-        let config = test_config();
-        let state = ServerState::open(&config).unwrap();
+        let (_dir, state) = test_state();
 
         state
             .register_app(
@@ -325,33 +357,75 @@ mod tests {
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].name, "cyanea");
         assert_eq!(apps[0].domain, "cyanea.bio");
+        assert_eq!(apps[0].status, "no-release");
     }
 
     #[test]
-    fn release_lifecycle() {
-        let config = test_config();
-        let state = ServerState::open(&config).unwrap();
+    fn get_app() {
+        let (_dir, state) = test_state();
+
+        state
+            .register_app(
+                "myapp",
+                "myapp.com",
+                "beam",
+                Some("bin/server"),
+                None,
+                "sequential",
+                10,
+            )
+            .unwrap();
+
+        let app = state.get_app("myapp").unwrap().unwrap();
+        assert_eq!(app.app_type, "beam");
+        assert_eq!(app.binary_name.as_deref(), Some("bin/server"));
+        assert_eq!(app.deploy_strategy, "sequential");
+        assert_eq!(app.drain_seconds, 10);
+
+        assert!(state.get_app("nonexistent").unwrap().is_none());
+    }
+
+    #[test]
+    fn active_release_from_symlink() {
+        let (_dir, state) = test_state();
 
         state
             .register_app("myapp", "myapp.com", "binary", None, None, "blue-green", 5)
             .unwrap();
 
-        state.create_release("myapp", "20260305-001").unwrap();
-        state.activate_release("myapp", "20260305-001").unwrap();
+        // No release yet
+        assert!(state.get_active_release("myapp").unwrap().is_none());
+
+        // Create a release and symlink
+        let release_dir = state.app_dir("myapp").join("releases").join("20260305-001");
+        std::fs::create_dir_all(&release_dir).unwrap();
+        std::os::unix::fs::symlink(&release_dir, state.app_dir("myapp").join("current")).unwrap();
 
         assert_eq!(
             state.get_active_release("myapp").unwrap(),
             Some("20260305-001".into())
         );
+    }
 
-        // Deploy a new release
-        state.create_release("myapp", "20260305-002").unwrap();
-        state.activate_release("myapp", "20260305-002").unwrap();
+    #[test]
+    fn previous_release() {
+        let (_dir, state) = test_state();
 
-        assert_eq!(
-            state.get_active_release("myapp").unwrap(),
-            Some("20260305-002".into())
-        );
+        state
+            .register_app("myapp", "myapp.com", "binary", None, None, "blue-green", 5)
+            .unwrap();
+
+        let releases_dir = state.app_dir("myapp").join("releases");
+        std::fs::create_dir_all(releases_dir.join("20260305-001")).unwrap();
+        std::fs::create_dir_all(releases_dir.join("20260305-002")).unwrap();
+
+        // Point current at the second release
+        std::os::unix::fs::symlink(
+            releases_dir.join("20260305-002"),
+            state.app_dir("myapp").join("current"),
+        )
+        .unwrap();
+
         assert_eq!(
             state.get_previous_release("myapp").unwrap(),
             Some("20260305-001".into())
@@ -360,8 +434,7 @@ mod tests {
 
     #[test]
     fn secrets_crud() {
-        let config = test_config();
-        let state = ServerState::open(&config).unwrap();
+        let (_dir, state) = test_state();
 
         state
             .register_app("myapp", "myapp.com", "binary", None, None, "blue-green", 5)
@@ -375,6 +448,7 @@ mod tests {
         let secrets = state.get_secrets("myapp").unwrap();
         assert_eq!(secrets.len(), 2);
         assert_eq!(secrets[0], ("API_KEY".into(), "sk-123".into()));
+        assert_eq!(secrets[1], ("DB_URL".into(), "sqlite:data.db".into()));
 
         // Update
         state.set_secret("myapp", "API_KEY", "sk-456").unwrap();
@@ -387,5 +461,47 @@ mod tests {
 
         let secrets = state.get_secrets("myapp").unwrap();
         assert_eq!(secrets.len(), 1);
+    }
+
+    #[test]
+    fn secrets_file_permissions() {
+        let (_dir, state) = test_state();
+
+        state
+            .register_app("myapp", "myapp.com", "binary", None, None, "blue-green", 5)
+            .unwrap();
+
+        state.set_secret("myapp", "KEY", "value").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::metadata(state.secrets_path("myapp"))
+                .unwrap()
+                .permissions();
+            assert_eq!(perms.mode() & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn list_active_apps_only_returns_deployed() {
+        let (_dir, state) = test_state();
+
+        // App with no deploy
+        state
+            .register_app("app1", "app1.com", "binary", None, None, "blue-green", 5)
+            .unwrap();
+
+        // App with a deploy (current symlink)
+        state
+            .register_app("app2", "app2.com", "binary", None, None, "blue-green", 5)
+            .unwrap();
+        let release = state.app_dir("app2").join("releases").join("20260305-001");
+        std::fs::create_dir_all(&release).unwrap();
+        std::os::unix::fs::symlink(&release, state.app_dir("app2").join("current")).unwrap();
+
+        let active = state.list_active_apps().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].name, "app2");
     }
 }

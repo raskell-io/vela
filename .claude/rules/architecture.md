@@ -36,9 +36,10 @@ Vela must never shell out to Docker, podman, or any container runtime. No OCI im
 
 ## State
 
-- Server state in SQLite (`/var/vela/vela.db`)
-- App configs, release history, routing table
-- No external database dependency
+- Server state is filesystem-backed (no database)
+- App configs in `app.toml`, secrets in `secrets.env`, releases as directories
+- Active release tracked by `current` symlink
+- Inspectable with standard Unix tools (ls, cat, readlink)
 
 ## Deploy Flow Invariants
 

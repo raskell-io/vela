@@ -77,7 +77,7 @@ pub fn deploy(args: DeployArgs) -> Result<()> {
     let manifest_toml = std::fs::read_to_string(&args.manifest)?;
     ssh::activate(&server, app_name, &manifest_toml)?;
 
-    println!("  deployed {app_name} to {server}");
+    println!("deployed {app_name} to {server}");
 
     // Cleanup local tarball
     let _ = std::fs::remove_file(&tarball);
@@ -87,7 +87,7 @@ pub fn deploy(args: DeployArgs) -> Result<()> {
 
 pub fn status(args: StatusArgs) -> Result<()> {
     let server = resolve_server(args.server, &args.manifest)?;
-    ssh::run_remote(&server, &["vela", "apps"])?;
+    ssh::run_remote(&server, &["vela", "apps", "--verbose"])?;
     Ok(())
 }
 
@@ -111,7 +111,7 @@ pub fn rollback(args: RollbackArgs) -> Result<()> {
         .context("specify app name or have a Vela.toml")?;
 
     println!("rolling back {app_name} on {server}");
-    ssh::run_remote(&server, &["vela", "app", &app_name, "rollback"])?;
+    ssh::run_remote(&server, &["vela", "_rollback", &app_name])?;
     Ok(())
 }
 
@@ -124,7 +124,7 @@ pub fn secret(args: SecretArgs) -> Result<()> {
             manifest,
         } => {
             let server = resolve_server(server, &manifest)?;
-            ssh::run_remote(&server, &["vela", "secret", "set", &app, &pair])?;
+            ssh::run_remote(&server, &["vela", "_secret", "set", &app, &pair])?;
         }
         SecretAction::List {
             app,
@@ -132,7 +132,7 @@ pub fn secret(args: SecretArgs) -> Result<()> {
             manifest,
         } => {
             let server = resolve_server(server, &manifest)?;
-            ssh::run_remote(&server, &["vela", "secret", "list", &app])?;
+            ssh::run_remote(&server, &["vela", "_secret", "list", &app])?;
         }
         SecretAction::Remove {
             app,
@@ -141,7 +141,7 @@ pub fn secret(args: SecretArgs) -> Result<()> {
             manifest,
         } => {
             let server = resolve_server(server, &manifest)?;
-            ssh::run_remote(&server, &["vela", "secret", "remove", &app, &key])?;
+            ssh::run_remote(&server, &["vela", "_secret", "remove", &app, &key])?;
         }
     }
     Ok(())

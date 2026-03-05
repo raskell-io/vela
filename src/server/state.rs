@@ -15,6 +15,18 @@ pub struct AppInfo {
     pub status: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct AppRecord {
+    pub name: String,
+    pub domain: String,
+    pub app_type: String,
+    pub binary_name: Option<String>,
+    pub health_path: Option<String>,
+    pub deploy_strategy: String,
+    pub drain_seconds: u32,
+    pub port: Option<u16>,
+}
+
 impl ServerState {
     pub fn open(config: &ServerConfig) -> Result<Self> {
         let db_path = config.db_path();
@@ -202,6 +214,65 @@ impl ServerState {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(secrets)
+    }
+
+    pub fn get_app(&self, name: &str) -> Result<Option<AppRecord>> {
+        let result = self.db.query_row(
+            "SELECT name, domain, app_type, binary_name, health_path, deploy_strategy, drain_seconds, port
+             FROM apps WHERE name = ?1",
+            rusqlite::params![name],
+            |row| {
+                Ok(AppRecord {
+                    name: row.get(0)?,
+                    domain: row.get(1)?,
+                    app_type: row.get(2)?,
+                    binary_name: row.get(3)?,
+                    health_path: row.get(4)?,
+                    deploy_strategy: row.get(5)?,
+                    drain_seconds: row.get(6)?,
+                    port: row.get::<_, Option<i64>>(7)?.map(|p| p as u16),
+                })
+            },
+        );
+        match result {
+            Ok(app) => Ok(Some(app)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn update_app_port(&self, name: &str, port: u16) -> Result<()> {
+        self.db.execute(
+            "UPDATE apps SET port = ?2, updated_at = datetime('now') WHERE name = ?1",
+            rusqlite::params![name, port as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_active_apps(&self) -> Result<Vec<AppRecord>> {
+        let mut stmt = self.db.prepare(
+            "SELECT a.name, a.domain, a.app_type, a.binary_name, a.health_path,
+                    a.deploy_strategy, a.drain_seconds, a.port
+             FROM apps a
+             JOIN releases r ON r.app_name = a.name AND r.status = 'active'
+             WHERE a.port IS NOT NULL
+             ORDER BY a.name",
+        )?;
+        let apps = stmt
+            .query_map([], |row| {
+                Ok(AppRecord {
+                    name: row.get(0)?,
+                    domain: row.get(1)?,
+                    app_type: row.get(2)?,
+                    binary_name: row.get(3)?,
+                    health_path: row.get(4)?,
+                    deploy_strategy: row.get(5)?,
+                    drain_seconds: row.get(6)?,
+                    port: row.get::<_, Option<i64>>(7)?.map(|p| p as u16),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(apps)
     }
 
     pub fn remove_secret(&self, app_name: &str, key: &str) -> Result<bool> {

@@ -37,6 +37,24 @@ pub enum Command {
 
     /// List running apps (server-side)
     Apps(AppsArgs),
+
+    // -----------------------------------------------------------------------
+    // Internal commands (called by the client over SSH, not user-facing)
+    // -----------------------------------------------------------------------
+    /// [internal] Activate a deploy on the server
+    #[command(hide = true)]
+    #[clap(name = "_deploy")]
+    InternalDeploy(InternalDeployArgs),
+
+    /// [internal] Rollback an app on the server
+    #[command(hide = true)]
+    #[clap(name = "_rollback")]
+    InternalRollback(InternalRollbackArgs),
+
+    /// [internal] Manage secrets on the server
+    #[command(hide = true)]
+    #[clap(name = "_secret")]
+    InternalSecret(InternalSecretArgs),
 }
 
 // ---------------------------------------------------------------------------
@@ -177,5 +195,59 @@ pub enum SecretAction {
         /// Path to Vela.toml
         #[arg(short, long, default_value = "Vela.toml")]
         manifest: PathBuf,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Internal commands (server-side, called via SSH)
+// ---------------------------------------------------------------------------
+
+#[derive(clap::Args)]
+pub struct InternalDeployArgs {
+    /// App name
+    pub app: String,
+
+    /// Path to server config file
+    #[arg(short, long, default_value = "/etc/vela/server.toml")]
+    pub config: PathBuf,
+}
+
+#[derive(clap::Args)]
+pub struct InternalRollbackArgs {
+    /// App name
+    pub app: String,
+
+    /// Path to server config file
+    #[arg(short, long, default_value = "/etc/vela/server.toml")]
+    pub config: PathBuf,
+}
+
+#[derive(clap::Args)]
+pub struct InternalSecretArgs {
+    #[command(subcommand)]
+    pub action: InternalSecretAction,
+}
+
+#[derive(Subcommand)]
+pub enum InternalSecretAction {
+    /// Set a secret
+    Set {
+        app: String,
+        pair: String,
+        #[arg(short, long, default_value = "/etc/vela/server.toml")]
+        config: PathBuf,
+    },
+    /// List secret keys
+    List {
+        app: String,
+        #[arg(short, long, default_value = "/etc/vela/server.toml")]
+        config: PathBuf,
+    },
+    /// Remove a secret
+    Remove {
+        app: String,
+        key: String,
+        #[arg(short, long, default_value = "/etc/vela/server.toml")]
+        config: PathBuf,
     },
 }

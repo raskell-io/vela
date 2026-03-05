@@ -197,6 +197,15 @@ impl ProcessManager {
             .map(|p| p.port)
     }
 
+    /// Promote a pending instance directly to active (without swap/drain).
+    /// Used during restore and one-shot _deploy commands.
+    pub fn promote_pending_to_active(&mut self, app_name: &str) {
+        let pending_key = format!("{app_name}:pending");
+        if let Some(process) = self.running.remove(&pending_key) {
+            self.running.insert(app_name.to_string(), process);
+        }
+    }
+
     /// List all active apps.
     pub fn list_active(&self) -> Vec<(&str, u16)> {
         self.running

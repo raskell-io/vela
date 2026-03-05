@@ -79,12 +79,44 @@ pub enum AppType {
     Beam,
 }
 
+impl AppType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AppType::Binary => "binary",
+            AppType::Beam => "beam",
+        }
+    }
+
+    pub fn from_str_loose(s: &str) -> Self {
+        match s {
+            "beam" => AppType::Beam,
+            _ => AppType::Binary,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum DeployStrategy {
     #[default]
     BlueGreen,
     Sequential,
+}
+
+impl DeployStrategy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DeployStrategy::BlueGreen => "blue-green",
+            DeployStrategy::Sequential => "sequential",
+        }
+    }
+
+    pub fn from_str_loose(s: &str) -> Self {
+        match s {
+            "sequential" => DeployStrategy::Sequential,
+            _ => DeployStrategy::BlueGreen,
+        }
+    }
 }
 
 /// Server-side config (/etc/vela/server.toml)
@@ -128,7 +160,7 @@ impl Default for ProxyConfig {
     }
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
 pub struct TlsConfig {
     /// ACME email for Let's Encrypt
     #[serde(default)]
@@ -137,6 +169,14 @@ pub struct TlsConfig {
     /// Use Let's Encrypt staging (for testing)
     #[serde(default)]
     pub staging: bool,
+
+    /// Path to TLS certificate (for Cloudflare Origin Certs or custom certs)
+    #[serde(default)]
+    pub cert: Option<PathBuf>,
+
+    /// Path to TLS private key
+    #[serde(default)]
+    pub key: Option<PathBuf>,
 }
 
 impl Manifest {
@@ -145,6 +185,12 @@ impl Manifest {
             .map_err(|e| anyhow::anyhow!("failed to read {}: {}", path.display(), e))?;
         let manifest: Self = toml::from_str(&content)
             .map_err(|e| anyhow::anyhow!("failed to parse {}: {}", path.display(), e))?;
+        Ok(manifest)
+    }
+
+    pub fn from_toml_str(s: &str) -> anyhow::Result<Self> {
+        let manifest: Self =
+            toml::from_str(s).map_err(|e| anyhow::anyhow!("failed to parse manifest: {}", e))?;
         Ok(manifest)
     }
 }
@@ -172,6 +218,10 @@ impl ServerConfig {
 
     pub fn db_path(&self) -> PathBuf {
         self.data_dir.join("vela.db")
+    }
+
+    pub fn logs_dir(&self) -> PathBuf {
+        self.data_dir.join("logs")
     }
 }
 
@@ -249,6 +299,17 @@ cpu_weight = 200
     }
 
     #[test]
+    fn parse_from_toml_str() {
+        let s = r#"
+[app]
+name = "test"
+domain = "test.com"
+"#;
+        let manifest = Manifest::from_toml_str(s).unwrap();
+        assert_eq!(manifest.app.name, "test");
+    }
+
+    #[test]
     fn parse_server_config_defaults() {
         let config = ServerConfig::default();
         assert_eq!(config.data_dir, PathBuf::from("/var/vela"));
@@ -274,5 +335,46 @@ staging = true
         assert_eq!(config.proxy.http_port, 8080);
         assert_eq!(config.tls.acme_email.as_deref(), Some("ops@example.com"));
         assert!(config.tls.staging);
+    }
+
+    #[test]
+    fn parse_server_config_with_static_tls() {
+        let toml_str = r#"
+[tls]
+cert = "/etc/vela/tls/origin.pem"
+key = "/etc/vela/tls/origin-key.pem"
+"#;
+        let config: ServerConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.tls.cert.as_deref(),
+            Some(Path::new("/etc/vela/tls/origin.pem"))
+        );
+        assert_eq!(
+            config.tls.key.as_deref(),
+            Some(Path::new("/etc/vela/tls/origin-key.pem"))
+        );
+    }
+
+    #[test]
+    fn app_type_round_trip() {
+        assert_eq!(AppType::Binary.as_str(), "binary");
+        assert_eq!(AppType::Beam.as_str(), "beam");
+        assert_eq!(AppType::from_str_loose("beam"), AppType::Beam);
+        assert_eq!(AppType::from_str_loose("binary"), AppType::Binary);
+        assert_eq!(AppType::from_str_loose("unknown"), AppType::Binary);
+    }
+
+    #[test]
+    fn deploy_strategy_round_trip() {
+        assert_eq!(DeployStrategy::BlueGreen.as_str(), "blue-green");
+        assert_eq!(DeployStrategy::Sequential.as_str(), "sequential");
+        assert_eq!(
+            DeployStrategy::from_str_loose("sequential"),
+            DeployStrategy::Sequential
+        );
+        assert_eq!(
+            DeployStrategy::from_str_loose("blue-green"),
+            DeployStrategy::BlueGreen
+        );
     }
 }

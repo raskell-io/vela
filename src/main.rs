@@ -49,5 +49,30 @@ fn main() -> Result<()> {
         cli::Command::Apps(_) => {
             anyhow::bail!("vela apps is only supported on Linux")
         }
+
+        // Internal commands (server-side, called via SSH)
+        #[cfg(target_os = "linux")]
+        cli::Command::InternalDeploy(args) => server::internal_deploy(args),
+
+        #[cfg(not(target_os = "linux"))]
+        cli::Command::InternalDeploy(_) => {
+            anyhow::bail!("_deploy is a server-side command (Linux only)")
+        }
+
+        #[cfg(target_os = "linux")]
+        cli::Command::InternalRollback(args) => server::internal_rollback(args),
+
+        #[cfg(not(target_os = "linux"))]
+        cli::Command::InternalRollback(_) => {
+            anyhow::bail!("_rollback is a server-side command (Linux only)")
+        }
+
+        #[cfg(target_os = "linux")]
+        cli::Command::InternalSecret(args) => server::internal_secret(args),
+
+        #[cfg(not(target_os = "linux"))]
+        cli::Command::InternalSecret(_) => {
+            anyhow::bail!("_secret is a server-side command (Linux only)")
+        }
     }
 }

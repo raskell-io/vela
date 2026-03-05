@@ -32,8 +32,8 @@ Vela uploads your binary (or BEAM release), starts it on a fresh port, runs a he
 │  └── SQLite state                           │
 │                                             │
 │  Apps                                       │
-│  ├── cyanea.bio      → :10001              │
-│  └── archipelag.io   → :10002              │
+│  ├── cyanea.bio      → :10001               │
+│  └── archipelag.io   → :10002               │
 └─────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────┐

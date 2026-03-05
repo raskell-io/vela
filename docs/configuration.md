@@ -1,0 +1,90 @@
+# Configuration
+
+Vela has two config files: one for your project (client-side) and one for the server.
+
+## Vela.toml (Project Manifest)
+
+Lives in your project root. Read by `vela deploy` and other client commands.
+
+```toml
+[app]
+name = "my-app"          # Required. App name (used in paths, logs, commands)
+domain = "my-app.com"    # Required. Domain that routes to this app
+
+[deploy]
+server = "root@1.2.3.4"  # SSH target (user@host)
+type = "binary"           # "binary" or "beam" (default: "binary")
+binary = "my-app"         # Entrypoint name within the release directory
+health = "/health"        # Health check path (GET, expects 200)
+drain = 5                 # Seconds to drain old connections (default: 5)
+strategy = "blue-green"   # "blue-green" or "sequential" (default: "blue-green")
+
+[env]
+DATABASE_PATH = "${data_dir}/my-app.db"
+RUST_LOG = "info"
+
+[resources]
+memory = "512M"           # Memory limit (future)
+cpu_weight = 100          # CPU weight, relative (future)
+```
+
+### App Types
+
+**`binary`** — A compiled binary. Vela runs it directly. Use for Rust, Go, C, etc.
+
+**`beam`** — An Elixir/Phoenix release (from `mix release`). Vela runs `bin/server start` (or whatever you set as `binary`). The release includes the BEAM runtime, so no Erlang/Elixir install is needed on the server.
+
+### Deploy Strategies
+
+**`blue-green`** (default) — Starts the new instance alongside the old one. After the health check passes, traffic swaps to the new instance and the old one drains. True zero downtime. Best for stateless apps.
+
+**`sequential`** — Stops the old instance, then starts the new one. Sub-second blip. Use this for apps with SQLite databases to avoid write contention during the brief overlap window.
+
+### Environment Variable Substitution
+
+Values in `[env]` support these variables:
+
+| Variable | Expands to |
+|----------|------------|
+| `${data_dir}` | `/var/vela/apps/<name>/data` (persistent directory) |
+| `${secret:KEY}` | The value of secret `KEY` (set via `vela secret set`) |
+
+## server.toml (Server Config)
+
+Lives at `/etc/vela/server.toml` on the server. Read by `vela serve`.
+
+```toml
+data_dir = "/var/vela"    # Where apps, releases, and state live (default: /var/vela)
+
+[proxy]
+http_port = 80            # HTTP listener port (default: 80)
+https_port = 443          # HTTPS listener port (default: 443)
+
+[tls]
+acme_email = "ops@example.com"   # Email for Let's Encrypt registration
+staging = false                   # Use LE staging environment (for testing)
+```
+
+### Defaults
+
+If no server config file exists, Vela uses sensible defaults:
+- Data directory: `/var/vela`
+- HTTP on port 80, HTTPS on 443
+- No TLS until `acme_email` is set
+
+## Secrets
+
+Secrets are stored on the server, not in your repo. Manage them with:
+
+```bash
+# Set a secret
+vela secret set my-app SECRET_KEY_BASE=supersecretvalue
+
+# List secrets (shows keys only, not values)
+vela secret list my-app
+
+# Remove a secret
+vela secret remove my-app SECRET_KEY_BASE
+```
+
+Secrets are injected as environment variables when your app starts. Reference them in `Vela.toml` with `${secret:KEY}`.

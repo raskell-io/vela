@@ -1,0 +1,56 @@
+[package]
+name = "vela"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "No-downtime app deployment on bare metal. One binary. No containers."
+license = "MIT"
+
+[[bin]]
+name = "vela"
+path = "src/main.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Async
+tokio = { version = "1.50", features = ["full"] }
+
+# Proxy (server-only, but compiled in — single binary)
+pingora = "0.8"
+
+# Web/HTTP (for health checks, ACME)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+# State
+rusqlite = { version = "0.34", features = ["bundled"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+toml = "1.0"
+
+# Time
+chrono = "0.4"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Linux isolation (server-only, compiled on all platforms for now)
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.30", features = ["process", "mount", "sched", "signal", "user"] }
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

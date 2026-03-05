@@ -1,0 +1,147 @@
+# Vela - mise configuration
+# https://mise.jdx.dev/
+
+[env]
+RUST_BACKTRACE = "1"
+CARGO_TERM_COLOR = "always"
+
+[tools]
+rust = "1.93"
+
+# =============================================================================
+# Build
+# =============================================================================
+
+[tasks.build]
+description = "Build (debug)"
+run = "cargo build"
+
+[tasks."build:release"]
+description = "Build optimized release binary"
+run = "cargo build --release"
+
+[tasks."build:static"]
+description = "Build fully static binary for Linux (musl)"
+run = """
+rustup target add x86_64-unknown-linux-musl 2>/dev/null || true
+cargo build --release --target x86_64-unknown-linux-musl
+"""
+
+# =============================================================================
+# Development
+# =============================================================================
+
+[tasks.dev]
+description = "Run in development mode with auto-reload"
+run = "cargo watch -x run"
+
+[tasks.check]
+description = "Quick compile check"
+run = "cargo check"
+
+[tasks.fmt]
+description = "Format code"
+run = "cargo fmt"
+
+[tasks."fmt:check"]
+description = "Check formatting"
+run = "cargo fmt -- --check"
+
+[tasks.clippy]
+description = "Run clippy lints"
+run = "cargo clippy -- -D warnings"
+
+[tasks.lint]
+description = "Run all lints (fmt + clippy)"
+depends = ["fmt:check", "clippy"]
+
+# =============================================================================
+# Test
+# =============================================================================
+
+[tasks.test]
+description = "Run all tests"
+run = "cargo test"
+
+[tasks."test:unit"]
+description = "Run unit tests only"
+run = "cargo test --lib"
+
+[tasks."test:integration"]
+description = "Run integration tests"
+run = "cargo test --test '*'"
+
+[tasks."test:watch"]
+description = "Run tests with auto-reload"
+run = "cargo watch -x test"
+
+# =============================================================================
+# Documentation
+# =============================================================================
+
+[tasks.doc]
+description = "Generate documentation"
+run = "cargo doc --no-deps"
+
+[tasks."doc:open"]
+description = "Generate and open documentation"
+run = "cargo doc --no-deps --open"
+
+# =============================================================================
+# Release
+# =============================================================================
+
+[tasks.release]
+description = "Full release pipeline"
+depends = ["lint", "test", "build:release"]
+
+# =============================================================================
+# Install
+# =============================================================================
+
+[tasks.install]
+description = "Install vela locally"
+run = "cargo install --path ."
+
+[tasks."install:dev"]
+description = "Install development tools"
+run = """
+cargo install cargo-watch
+cargo install cargo-audit
+"""
+
+# =============================================================================
+# Maintenance
+# =============================================================================
+
+[tasks.audit]
+description = "Audit dependencies for vulnerabilities"
+run = "cargo audit"
+
+[tasks.outdated]
+description = "Check for outdated dependencies"
+run = "cargo outdated"
+
+[tasks.clean]
+description = "Clean build artifacts"
+run = "cargo clean"
+
+# =============================================================================
+# CI
+# =============================================================================
+
+[tasks.ci]
+description = "Run full CI pipeline"
+depends = ["fmt:check", "clippy", "test", "build:release", "doc"]
+
+[tasks."ci:quick"]
+description = "Quick CI check"
+depends = ["check", "test:unit"]
+
+# =============================================================================
+# Deploy (for testing vela itself)
+# =============================================================================
+
+[tasks."server:dev"]
+description = "Run vela server locally"
+run = "RUST_LOG=debug cargo run -- serve"

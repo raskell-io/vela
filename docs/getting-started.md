@@ -1,0 +1,136 @@
+# Getting Started
+
+This guide walks you through setting up Vela on a server and deploying your first app.
+
+## Prerequisites
+
+- A Linux server (Hetzner dedicated, bare metal, or any VPS)
+- SSH access with key-based auth
+- Your app builds to a binary (Rust, Go, etc.) or a BEAM release (Elixir/Phoenix)
+
+## 1. Install Vela on Your Server
+
+SSH into your server and install the vela binary:
+
+```bash
+# Download the latest release (or build from source)
+curl -fsSL https://github.com/raskell-io/vela/releases/latest/download/vela-linux-amd64 -o /usr/local/bin/vela
+chmod +x /usr/local/bin/vela
+```
+
+Create the server config:
+
+```bash
+mkdir -p /etc/vela
+cat > /etc/vela/server.toml <<'EOF'
+data_dir = "/var/vela"
+
+[proxy]
+http_port = 80
+https_port = 443
+
+[tls]
+acme_email = "you@example.com"
+EOF
+```
+
+Start the server:
+
+```bash
+# As a systemd service (recommended)
+vela serve --config /etc/vela/server.toml
+
+# Or manually for testing
+RUST_LOG=info vela serve
+```
+
+## 2. Install Vela on Your Laptop
+
+```bash
+# macOS (Homebrew, coming soon)
+# brew install raskell-io/tap/vela
+
+# From source
+cargo install --git https://github.com/raskell-io/vela
+```
+
+## 3. Initialize Your Project
+
+In your app's repository:
+
+```bash
+cd my-app
+vela init --name my-app --domain my-app.example.com
+```
+
+This creates a `Vela.toml`:
+
+```toml
+[app]
+name = "my-app"
+domain = "my-app.example.com"
+
+[deploy]
+server = "root@your-server.example.com"
+type = "binary"
+binary = "my-app"
+health = "/health"
+
+[env]
+# DATABASE_PATH = "${data_dir}/my-app.db"
+
+[resources]
+# memory = "512M"
+```
+
+Edit `[deploy].server` to point at your server.
+
+## 4. Deploy
+
+Build your app and deploy:
+
+```bash
+# Rust app
+cargo build --release
+vela deploy ./target/release/my-app
+
+# Elixir/Phoenix app
+MIX_ENV=prod mix release
+vela deploy ./_build/prod/rel/my_app
+```
+
+That's it. Vela uploads the artifact, starts it, runs a health check, and swaps traffic.
+
+## 5. Verify
+
+```bash
+# Check status
+vela status
+
+# Tail logs
+vela logs my-app -f
+
+# Visit your app
+curl https://my-app.example.com
+```
+
+## What Happens Under the Hood
+
+1. `vela deploy` creates a tarball of your artifact
+2. Uploads it to the server via `scp`
+3. Server extracts it to `/var/vela/apps/my-app/releases/<timestamp>/`
+4. Server starts the new binary on a random port
+5. Server hits your health check endpoint until it returns 200
+6. Proxy swaps traffic from old instance to new
+7. Old instance drains connections and shuts down
+
+Your app receives these environment variables:
+
+| Variable | Value |
+|----------|-------|
+| `PORT` | The port to listen on |
+| `VELA_PORT` | Same as `PORT` |
+| `VELA_DATA_DIR` | Persistent data directory (survives deploys) |
+| `VELA_APP_NAME` | Your app name |
+
+Plus any variables you define in `[env]` in your `Vela.toml`.

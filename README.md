@@ -49,14 +49,27 @@ Vela uploads your binary (or BEAM release), starts it on a fresh port, runs a he
 - **SQLite-aware** — persistent data directories survive deploys
 - **Rust and Elixir** — deploy compiled binaries or BEAM releases
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/raskell-io/vela/main/install.sh | bash
+```
+
+Or specify a version and install directory:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/raskell-io/vela/main/install.sh | bash -s -- --version v0.1.0 --to ~/.local/bin
+```
+
+Binaries are available for Linux (amd64, arm64) and macOS (amd64, arm64).
+
 ## Quick Start
 
 ### 1. Server Setup
 
 ```bash
-# Install vela
-curl -fsSL https://github.com/raskell-io/vela/releases/latest/download/vela-linux-amd64 \
-  -o /usr/local/bin/vela && chmod +x /usr/local/bin/vela
+# Install vela on your server
+curl -fsSL https://raw.githubusercontent.com/raskell-io/vela/main/install.sh | bash
 
 # Start
 vela serve
@@ -158,10 +171,18 @@ Early development. The core deploy flow works. Building towards:
 ```bash
 # Requires Rust 1.93+
 cargo install --path .
-
-# Or build a static Linux binary
-cargo build --release --target x86_64-unknown-linux-musl
 ```
+
+## Release Process
+
+Tag a version to trigger the release pipeline:
+
+```bash
+git tag v0.1.0
+git push --tags
+```
+
+GitHub Actions builds binaries for all platforms and attaches them to the release with checksums.
 
 ## License
 

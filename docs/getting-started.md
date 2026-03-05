@@ -10,12 +10,18 @@ This guide walks you through setting up Vela on a server and deploying your firs
 
 ## 1. Install Vela on Your Server
 
-SSH into your server and install the vela binary:
+SSH into your server and run the install script:
 
 ```bash
-# Download the latest release (or build from source)
-curl -fsSL https://github.com/raskell-io/vela/releases/latest/download/vela-linux-amd64 -o /usr/local/bin/vela
-chmod +x /usr/local/bin/vela
+curl -fsSL https://raw.githubusercontent.com/raskell-io/vela/main/install.sh | bash
+```
+
+This detects your platform (linux/amd64 or linux/arm64), downloads the latest release, and installs it to `/usr/local/bin/vela`.
+
+To install a specific version or to a different directory:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/raskell-io/vela/main/install.sh | bash -s -- --version v0.1.0 --to /opt/bin
 ```
 
 Create the server config:
@@ -46,11 +52,21 @@ RUST_LOG=info vela serve
 
 ## 2. Install Vela on Your Laptop
 
-```bash
-# macOS (Homebrew, coming soon)
-# brew install raskell-io/tap/vela
+Run the same install script — it detects macOS/Linux and amd64/arm64 automatically:
 
-# From source
+```bash
+curl -fsSL https://raw.githubusercontent.com/raskell-io/vela/main/install.sh | bash
+```
+
+Or install to a user-local directory (no sudo needed):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/raskell-io/vela/main/install.sh | bash -s -- --to ~/.local/bin
+```
+
+Or build from source (requires Rust 1.93+):
+
+```bash
 cargo install --git https://github.com/raskell-io/vela
 ```
 
@@ -134,3 +150,17 @@ Your app receives these environment variables:
 | `VELA_APP_NAME` | Your app name |
 
 Plus any variables you define in `[env]` in your `Vela.toml`.
+
+## Updating Vela
+
+Run the install script again to get the latest version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/raskell-io/vela/main/install.sh | bash
+```
+
+Or pin a specific version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/raskell-io/vela/main/install.sh | bash -s -- --version v0.2.0
+```

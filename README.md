@@ -44,7 +44,7 @@ Vela uploads your binary (or BEAM release), starts it on a fresh port, runs a he
 ```
 
 - **One binary** — same `vela` runs on server and laptop
-- **Embedded proxy** — Pingora (by Cloudflare) with automatic Let's Encrypt TLS
+- **Embedded proxy** — hyper-based reverse proxy with TLS support
 - **SSH is the control plane** — no tokens, no API keys, no custom auth
 - **SQLite-aware** — persistent data directories survive deploys
 - **Rust and Elixir** — deploy compiled binaries or BEAM releases
@@ -157,13 +157,28 @@ memory = "512M"
 
 ## Status
 
-Early development. The core deploy flow works. Building towards:
+Core functionality is built and working:
 
-- [ ] Pingora proxy integration with auto-TLS
-- [ ] `_deploy` internal command (server-side deploy receiver)
+- [x] Single binary (server + client)
+- [x] SSH-based deploy pipeline (upload → extract → health check → swap)
+- [x] Hyper-based reverse proxy with TLS (Cloudflare Origin Certs)
+- [x] Blue-green and sequential deploy strategies
+- [x] Process manager with port allocation and graceful shutdown
+- [x] Filesystem-backed state (no database dependency)
+- [x] Secret management (per-app, mode 0600)
+- [x] Rollback to previous release
+- [x] App restore on server restart
+- [x] Elixir/Phoenix BEAM release support
+- [x] CI/CD pipeline with multi-platform release builds
+- [x] Install script
+
+Coming next:
+
+- [ ] Let's Encrypt auto-TLS (ACME)
 - [ ] systemd service generation
-- [ ] Process isolation (namespaces, cgroups)
+- [ ] Process isolation (namespaces, cgroups v2)
 - [ ] Litestream integration for SQLite backups
+- [ ] Log streaming (`vela logs -f`)
 - [ ] Multi-server deploys
 
 ## Building from Source

@@ -140,6 +140,8 @@ vela logs my-app -f
 curl https://my-app.example.com
 ```
 
+For a complete pre-flight checklist (firewall, DNS, TLS staging, troubleshooting), see [Production Checklist](production-checklist.md).
+
 ## What Happens Under the Hood
 
 1. `vela deploy` creates a tarball of your artifact

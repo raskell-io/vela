@@ -90,9 +90,10 @@ pub fn run(args: ServeArgs) -> Result<()> {
                 loop {
                     interval.tick().await;
                     tracing::debug!("checking for certificate renewals");
-                    if let Err(e) =
-                        acme::provision_and_load_certs(&data_dir, &domains, &email, &cs, &cr, staging)
-                            .await
+                    if let Err(e) = acme::provision_and_load_certs(
+                        &data_dir, &domains, &email, &cs, &cr, staging,
+                    )
+                    .await
                     {
                         tracing::error!(err = %e, "ACME cert renewal check failed");
                     }
@@ -200,7 +201,9 @@ async fn restore_apps(
 
         // Merge env: manifest env vars first, then secrets override
         let secrets = state.get_secrets(&app.name)?;
-        let mut env_vars: Vec<(String, String)> = app.env.iter()
+        let mut env_vars: Vec<(String, String)> = app
+            .env
+            .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         for (key, value) in &secrets {

@@ -32,8 +32,8 @@ Vela uploads your binary (or BEAM release), starts it on a fresh port, runs a he
 │  └── IPC socket (/var/vela/vela.sock)       │
 │                                             │
 │  Apps                                       │
-│  ├── cyanea.bio      → :10001              │
-│  └── archipelag.io   → :10002              │
+│  ├── next.ai         → :10001               │
+│  └── giga.app        → :10002               │
 └─────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────┐

@@ -184,15 +184,15 @@ async fn handle_request(
     req: Request<Incoming>,
     route_table: &RouteTable,
 ) -> Result<Response<BoxBody>, hyper::Error> {
-    // Extract host from Host header
+    // Extract host from Host header (owned to avoid borrowing req)
     let host = req
         .headers()
         .get(hyper::header::HOST)
         .and_then(|v| v.to_str().ok())
-        .map(|h| h.split(':').next().unwrap_or(h))
-        .unwrap_or("");
+        .map(|h| h.split(':').next().unwrap_or(h).to_string())
+        .unwrap_or_default();
 
-    let upstream_port = match route_table.get(host) {
+    let upstream_port = match route_table.get(&host) {
         Some(port) => port,
         None => {
             tracing::debug!(host, "no route found");

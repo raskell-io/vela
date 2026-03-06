@@ -398,7 +398,16 @@ mod tests {
         let (_dir, state) = test_state();
 
         state
-            .register_app("myapp", "myapp.com", "binary", None, None, "blue-green", 5)
+            .register_app(
+                "myapp",
+                "myapp.com",
+                "binary",
+                None,
+                None,
+                "blue-green",
+                5,
+                HashMap::new(),
+            )
             .unwrap();
 
         // No release yet
@@ -420,7 +429,16 @@ mod tests {
         let (_dir, state) = test_state();
 
         state
-            .register_app("myapp", "myapp.com", "binary", None, None, "blue-green", 5)
+            .register_app(
+                "myapp",
+                "myapp.com",
+                "binary",
+                None,
+                None,
+                "blue-green",
+                5,
+                HashMap::new(),
+            )
             .unwrap();
 
         let releases_dir = state.app_dir("myapp").join("releases");
@@ -445,7 +463,16 @@ mod tests {
         let (_dir, state) = test_state();
 
         state
-            .register_app("myapp", "myapp.com", "binary", None, None, "blue-green", 5)
+            .register_app(
+                "myapp",
+                "myapp.com",
+                "binary",
+                None,
+                None,
+                "blue-green",
+                5,
+                HashMap::new(),
+            )
             .unwrap();
 
         state.set_secret("myapp", "API_KEY", "sk-123").unwrap();
@@ -476,7 +503,16 @@ mod tests {
         let (_dir, state) = test_state();
 
         state
-            .register_app("myapp", "myapp.com", "binary", None, None, "blue-green", 5)
+            .register_app(
+                "myapp",
+                "myapp.com",
+                "binary",
+                None,
+                None,
+                "blue-green",
+                5,
+                HashMap::new(),
+            )
             .unwrap();
 
         state.set_secret("myapp", "KEY", "value").unwrap();
@@ -497,12 +533,30 @@ mod tests {
 
         // App with no deploy
         state
-            .register_app("app1", "app1.com", "binary", None, None, "blue-green", 5)
+            .register_app(
+                "app1",
+                "app1.com",
+                "binary",
+                None,
+                None,
+                "blue-green",
+                5,
+                HashMap::new(),
+            )
             .unwrap();
 
         // App with a deploy (current symlink)
         state
-            .register_app("app2", "app2.com", "binary", None, None, "blue-green", 5)
+            .register_app(
+                "app2",
+                "app2.com",
+                "binary",
+                None,
+                None,
+                "blue-green",
+                5,
+                HashMap::new(),
+            )
             .unwrap();
         let release = state.app_dir("app2").join("releases").join("20260305-001");
         std::fs::create_dir_all(&release).unwrap();

@@ -40,15 +40,25 @@ acme_email = "you@example.com"
 EOF
 ```
 
-Start the server:
+Start the server as a systemd service (recommended):
 
 ```bash
-# As a systemd service (recommended)
-vela serve --config /etc/vela/server.toml
+# Generate and install the systemd unit file
+vela setup
 
-# Or manually for testing
-RUST_LOG=info vela serve
+# Enable and start
+sudo systemctl enable --now vela
 ```
+
+Or run manually for testing:
+
+```bash
+RUST_LOG=info vela serve --config /etc/vela/server.toml
+```
+
+**Important:** The server config must be at `/etc/vela/server.toml`. All internal commands (`_deploy`, `_rollback`, `_secret`, `_logs`) use this as the default config path. If you use a non-default path, you'll need to configure the `--config` flag in your deploy commands.
+
+The `vela serve` daemon must be running before you deploy. The deploy command communicates with the daemon via a Unix socket at `/var/vela/vela.sock`. If the daemon isn't running, deploys will fail with "failed to connect to vela daemon".
 
 ## 2. Install Vela on Your Laptop
 

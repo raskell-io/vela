@@ -48,7 +48,7 @@ impl RouteTable {
     }
 }
 
-/// Start the Pingora-based reverse proxy.
+/// Start the reverse proxy.
 ///
 /// The proxy listens on the configured HTTP (and optionally HTTPS) ports,
 /// routes requests by Host header to upstream app ports via the RouteTable.
@@ -64,42 +64,51 @@ pub fn start_proxy(
     let rt = route_table.clone();
     let cs = challenge_store.clone();
 
-    tokio::spawn(async move {
-        if let Err(e) = run_http_proxy(http_port, rt, cs).await {
-            tracing::error!(err = %e, "HTTP proxy exited with error");
-        }
-    });
+    // Shared HTTP client for upstream forwarding (connection pooling)
+    let upstream_client = reqwest::Client::builder().no_proxy().build().unwrap();
 
     // Start HTTPS proxy if we have either static certs or a dynamic cert resolver
     let tls_config = config.tls.clone();
     let has_static_tls = tls_config.cert.is_some() && tls_config.key.is_some();
+    let has_tls = has_static_tls || cert_resolver.is_some();
 
-    if has_static_tls || cert_resolver.is_some() {
-        let https_port = config.proxy.https_port;
+    let https_port = config.proxy.https_port;
+
+    // HTTP proxy — also handles ACME challenges and HTTP→HTTPS redirects
+    let client_http = upstream_client.clone();
+    tokio::spawn(async move {
+        if let Err(e) = run_http_proxy(http_port, rt, cs, client_http, has_tls, https_port).await {
+            tracing::error!(err = %e, "HTTP proxy exited with error");
+        }
+    });
+
+    if has_tls {
         let rt2 = route_table.clone();
+        let client_https = upstream_client;
 
         if let Some(resolver) = cert_resolver {
             // Dynamic cert resolution (ACME or mixed)
-            // Also load static certs into the resolver if configured
             if let (Some(cert_path), Some(key_path)) = (&tls_config.cert, &tls_config.key) {
-                // Load static cert as a wildcard/default — use "*" as domain
                 if let Err(e) = resolver.load_cert("*", cert_path, key_path) {
                     tracing::warn!(err = %e, "failed to load static TLS cert into resolver");
                 }
             }
 
             tokio::spawn(async move {
-                if let Err(e) = run_https_proxy_dynamic(https_port, rt2, resolver).await {
+                if let Err(e) =
+                    run_https_proxy_dynamic(https_port, rt2, resolver, client_https).await
+                {
                     tracing::error!(err = %e, "HTTPS proxy exited with error");
                 }
             });
         } else {
-            // Static cert only (no ACME)
             let cert_path = tls_config.cert.clone().unwrap();
             let key_path = tls_config.key.clone().unwrap();
 
             tokio::spawn(async move {
-                if let Err(e) = run_https_proxy(https_port, rt2, &cert_path, &key_path).await {
+                if let Err(e) =
+                    run_https_proxy(https_port, rt2, &cert_path, &key_path, client_https).await
+                {
                     tracing::error!(err = %e, "HTTPS proxy exited with error");
                 }
             });
@@ -133,6 +142,9 @@ async fn run_http_proxy(
     port: u16,
     route_table: RouteTable,
     challenge_store: ChallengeStore,
+    client: reqwest::Client,
+    has_tls: bool,
+    https_port: u16,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     tracing::info!(port, "HTTP proxy listening");
@@ -141,12 +153,14 @@ async fn run_http_proxy(
         let (stream, addr) = listener.accept().await?;
         let rt = route_table.clone();
         let cs = challenge_store.clone();
+        let client = client.clone();
 
         tokio::spawn(async move {
             let service = service_fn(move |req: Request<Incoming>| {
                 let rt = rt.clone();
                 let cs = cs.clone();
-                async move { handle_request(req, &rt, &cs).await }
+                let client = client.clone();
+                async move { handle_http_request(req, &rt, &cs, &client, has_tls, https_port).await }
             });
 
             if let Err(e) = http1::Builder::new()
@@ -164,6 +178,7 @@ async fn run_https_proxy(
     route_table: RouteTable,
     cert_path: &std::path::Path,
     key_path: &std::path::Path,
+    client: reqwest::Client,
 ) -> anyhow::Result<()> {
     use tokio_rustls::TlsAcceptor;
 
@@ -183,6 +198,7 @@ async fn run_https_proxy(
         let (stream, addr) = listener.accept().await?;
         let acceptor = acceptor.clone();
         let rt = route_table.clone();
+        let client = client.clone();
 
         tokio::spawn(async move {
             let tls_stream = match acceptor.accept(stream).await {
@@ -195,8 +211,8 @@ async fn run_https_proxy(
 
             let service = service_fn(move |req: Request<Incoming>| {
                 let rt = rt.clone();
-                let cs = ChallengeStore::new(); // HTTPS doesn't need challenges
-                async move { handle_request(req, &rt, &cs).await }
+                let client = client.clone();
+                async move { forward_request(req, &rt, &client).await }
             });
 
             if let Err(e) = http1::Builder::new()
@@ -213,6 +229,7 @@ async fn run_https_proxy_dynamic(
     port: u16,
     route_table: RouteTable,
     cert_resolver: Arc<CertResolver>,
+    client: reqwest::Client,
 ) -> anyhow::Result<()> {
     use tokio_rustls::TlsAcceptor;
 
@@ -228,6 +245,7 @@ async fn run_https_proxy_dynamic(
         let (stream, addr) = listener.accept().await?;
         let acceptor = acceptor.clone();
         let rt = route_table.clone();
+        let client = client.clone();
 
         tokio::spawn(async move {
             let tls_stream = match acceptor.accept(stream).await {
@@ -240,8 +258,8 @@ async fn run_https_proxy_dynamic(
 
             let service = service_fn(move |req: Request<Incoming>| {
                 let rt = rt.clone();
-                let cs = ChallengeStore::new();
-                async move { handle_request(req, &rt, &cs).await }
+                let client = client.clone();
+                async move { forward_request(req, &rt, &client).await }
             });
 
             if let Err(e) = http1::Builder::new()
@@ -254,12 +272,17 @@ async fn run_https_proxy_dynamic(
     }
 }
 
-async fn handle_request(
+/// Handle an HTTP request: serve ACME challenges, redirect to HTTPS if TLS is
+/// configured, or forward to upstream.
+async fn handle_http_request(
     req: Request<Incoming>,
     route_table: &RouteTable,
     challenge_store: &ChallengeStore,
+    client: &reqwest::Client,
+    has_tls: bool,
+    https_port: u16,
 ) -> Result<Response<BoxBody>, hyper::Error> {
-    // Serve ACME HTTP-01 challenges
+    // Always serve ACME HTTP-01 challenges over plain HTTP
     let path = req.uri().path().to_string();
     if path.starts_with("/.well-known/acme-challenge/") {
         let token = path.trim_start_matches("/.well-known/acme-challenge/");
@@ -273,7 +296,42 @@ async fn handle_request(
         }
     }
 
-    // Extract host from Host header (owned to avoid borrowing req)
+    // If TLS is configured, redirect HTTP → HTTPS
+    if has_tls {
+        let host = req
+            .headers()
+            .get(hyper::header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .map(|h| h.split(':').next().unwrap_or(h))
+            .unwrap_or_default();
+
+        if !host.is_empty() {
+            let location = if https_port == 443 {
+                format!("https://{host}{path}")
+            } else {
+                format!("https://{host}:{https_port}{path}")
+            };
+
+            return Ok(Response::builder()
+                .status(StatusCode::MOVED_PERMANENTLY)
+                .header("location", location)
+                .body(BoxBody::new(hyper::body::Bytes::from(
+                    "301 Moved Permanently\n",
+                )))
+                .unwrap());
+        }
+    }
+
+    // No TLS — forward directly
+    forward_request(req, route_table, client).await
+}
+
+/// Forward a request to the upstream app based on the Host header.
+async fn forward_request(
+    req: Request<Incoming>,
+    route_table: &RouteTable,
+    client: &reqwest::Client,
+) -> Result<Response<BoxBody>, hyper::Error> {
     let host = req
         .headers()
         .get(hyper::header::HOST)
@@ -294,9 +352,6 @@ async fn handle_request(
             return Ok(resp);
         }
     };
-
-    // Forward the request to the upstream app
-    let client = reqwest::Client::builder().no_proxy().build().unwrap();
 
     let uri = format!(
         "http://127.0.0.1:{upstream_port}{}",
@@ -319,7 +374,6 @@ async fn handle_request(
 
     let mut upstream_req = client.request(method, &uri);
 
-    // Extract headers and body from the incoming request
     let (parts, body) = req.into_parts();
 
     // Forward headers (except Host)
@@ -357,9 +411,9 @@ async fn handle_request(
             tracing::warn!(host, upstream_port, err = %e, "upstream request failed");
             let resp = Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
-                .body(BoxBody::new(hyper::body::Bytes::from(format!(
-                    "502 Bad Gateway: upstream error\n"
-                ))))
+                .body(BoxBody::new(hyper::body::Bytes::from(
+                    "502 Bad Gateway: upstream error\n".to_string(),
+                )))
                 .unwrap();
             Ok(resp)
         }

@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 
 use super::process::ProcessManager;
 use super::proxy::RouteTable;
-use crate::config::AppType;
+use crate::config::{AppType, DeployStrategy};
 use crate::health::HealthCheck;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -21,6 +21,7 @@ pub enum DaemonRequest {
         release_dir: PathBuf,
         binary_name: String,
         app_type: String,
+        strategy: String,
         data_dir: PathBuf,
         env_vars: Vec<(String, String)>,
         health_path: Option<String>,
@@ -95,6 +96,7 @@ async fn handle_connection(
             release_dir,
             binary_name,
             app_type,
+            strategy,
             data_dir,
             env_vars,
             health_path,
@@ -108,6 +110,7 @@ async fn handle_connection(
                 &release_dir,
                 &binary_name,
                 &app_type,
+                &strategy,
                 &data_dir,
                 &env_vars,
                 health_path.as_deref(),
@@ -136,6 +139,7 @@ async fn handle_deploy(
     release_dir: &Path,
     binary_name: &str,
     app_type: &str,
+    strategy: &str,
     data_dir: &Path,
     env_vars: &[(String, String)],
     health_path: Option<&str>,
@@ -143,19 +147,64 @@ async fn handle_deploy(
     domain: &str,
 ) -> DaemonResponse {
     let app_type_enum = AppType::from_str_loose(app_type);
+    let strategy_enum = DeployStrategy::from_str_loose(strategy);
 
-    // Start new instance
-    let port = {
-        let mut pm = process_manager.lock().await;
-        match pm
-            .start(
+    match strategy_enum {
+        DeployStrategy::BlueGreen => {
+            deploy_blue_green(
+                process_manager,
+                route_table,
                 app,
                 release_dir,
                 binary_name,
                 app_type_enum,
                 data_dir,
                 env_vars,
+                health_path,
+                drain_seconds,
+                domain,
             )
+            .await
+        }
+        DeployStrategy::Sequential => {
+            deploy_sequential(
+                process_manager,
+                route_table,
+                app,
+                release_dir,
+                binary_name,
+                app_type_enum,
+                data_dir,
+                env_vars,
+                health_path,
+                drain_seconds,
+                domain,
+            )
+            .await
+        }
+    }
+}
+
+/// Blue-green: start new → health check → swap traffic → drain old.
+/// Zero downtime. Two instances run briefly during the swap.
+async fn deploy_blue_green(
+    process_manager: &Arc<Mutex<ProcessManager>>,
+    route_table: &RouteTable,
+    app: &str,
+    release_dir: &Path,
+    binary_name: &str,
+    app_type: AppType,
+    data_dir: &Path,
+    env_vars: &[(String, String)],
+    health_path: Option<&str>,
+    drain_seconds: u32,
+    domain: &str,
+) -> DaemonResponse {
+    // Start new instance alongside old
+    let port = {
+        let mut pm = process_manager.lock().await;
+        match pm
+            .start(app, release_dir, binary_name, app_type, data_dir, env_vars)
             .await
         {
             Ok(port) => port,
@@ -169,30 +218,16 @@ async fn handle_deploy(
         }
     };
 
-    tracing::info!(app, port, "new instance started, running health check");
+    tracing::info!(
+        app,
+        port,
+        strategy = "blue-green",
+        "new instance started, running health check"
+    );
 
     // Health check
-    if let Some(health) = health_path {
-        let url = format!("http://127.0.0.1:{port}{health}");
-        let hc = HealthCheck::new(url);
-        match hc.wait_until_healthy().await {
-            Ok(()) => {
-                tracing::info!(app, port, "health check passed");
-            }
-            Err(e) => {
-                tracing::warn!(app, port, err = %e, "health check failed");
-                let mut pm = process_manager.lock().await;
-                let _ = pm.abort_pending(app).await;
-                return DaemonResponse {
-                    success: false,
-                    message: format!("health check failed: {e}"),
-                    port: None,
-                };
-            }
-        }
-    } else {
-        // No health check — wait briefly for the process to settle
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    if let Err(resp) = run_health_check(process_manager, app, port, health_path).await {
+        return resp;
     }
 
     // Swap: drain old instance, promote new
@@ -203,15 +238,134 @@ async fn handle_deploy(
         }
     }
 
-    // Update route table
     route_table.set(domain, port);
-
-    tracing::info!(app, port, domain, "deploy activated");
+    tracing::info!(
+        app,
+        port,
+        domain,
+        strategy = "blue-green",
+        "deploy activated"
+    );
 
     DaemonResponse {
         success: true,
         message: format!("deployed {app} on port {port}"),
         port: Some(port),
+    }
+}
+
+/// Sequential: stop old → start new → health check → activate.
+/// Sub-second blip. Use for SQLite apps to avoid write contention.
+async fn deploy_sequential(
+    process_manager: &Arc<Mutex<ProcessManager>>,
+    route_table: &RouteTable,
+    app: &str,
+    release_dir: &Path,
+    binary_name: &str,
+    app_type: AppType,
+    data_dir: &Path,
+    env_vars: &[(String, String)],
+    health_path: Option<&str>,
+    drain_seconds: u32,
+    domain: &str,
+) -> DaemonResponse {
+    // Stop old instance first (removes route so no traffic during gap)
+    {
+        let mut pm = process_manager.lock().await;
+        if pm.active_port(app).is_some() {
+            route_table.remove(domain);
+            tracing::info!(
+                app,
+                strategy = "sequential",
+                "stopping old instance before starting new"
+            );
+            if let Err(e) = pm.stop(app).await {
+                tracing::warn!(app, err = %e, "stop warning (may be first deploy)");
+            }
+        }
+    }
+
+    // Start new instance
+    let port = {
+        let mut pm = process_manager.lock().await;
+        match pm
+            .start(app, release_dir, binary_name, app_type, data_dir, env_vars)
+            .await
+        {
+            Ok(port) => port,
+            Err(e) => {
+                return DaemonResponse {
+                    success: false,
+                    message: format!("failed to start app: {e}"),
+                    port: None,
+                };
+            }
+        }
+    };
+
+    tracing::info!(
+        app,
+        port,
+        strategy = "sequential",
+        "new instance started, running health check"
+    );
+
+    // Health check
+    if let Err(resp) = run_health_check(process_manager, app, port, health_path).await {
+        return resp;
+    }
+
+    // Promote pending to active (no swap needed — old was already stopped)
+    {
+        let mut pm = process_manager.lock().await;
+        pm.promote_pending_to_active(app);
+    }
+
+    route_table.set(domain, port);
+    tracing::info!(
+        app,
+        port,
+        domain,
+        strategy = "sequential",
+        "deploy activated"
+    );
+
+    DaemonResponse {
+        success: true,
+        message: format!("deployed {app} on port {port}"),
+        port: Some(port),
+    }
+}
+
+/// Run health check on a pending instance. Returns Err(DaemonResponse) on failure.
+async fn run_health_check(
+    process_manager: &Arc<Mutex<ProcessManager>>,
+    app: &str,
+    port: u16,
+    health_path: Option<&str>,
+) -> Result<(), DaemonResponse> {
+    if let Some(health) = health_path {
+        let url = format!("http://127.0.0.1:{port}{health}");
+        let hc = HealthCheck::new(url);
+        match hc.wait_until_healthy().await {
+            Ok(()) => {
+                tracing::info!(app, port, "health check passed");
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(app, port, err = %e, "health check failed");
+                let mut pm = process_manager.lock().await;
+                let _ = pm.abort_pending(app).await;
+                Err(DaemonResponse {
+                    success: false,
+                    message: format!("health check failed: {e}"),
+                    port: None,
+                })
+            }
+        }
+    } else {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        Ok(())
     }
 }
 
@@ -277,6 +431,7 @@ mod tests {
             release_dir: PathBuf::from("/var/vela/apps/myapp/releases/001"),
             binary_name: "myapp".into(),
             app_type: "binary".into(),
+            strategy: "blue-green".into(),
             data_dir: PathBuf::from("/var/vela/apps/myapp/data"),
             env_vars: vec![("PORT".into(), "3000".into())],
             health_path: Some("/health".into()),

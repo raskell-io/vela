@@ -65,6 +65,21 @@ acme_email = "ops@example.com"   # Email for Let's Encrypt registration
 staging = false                   # Use LE staging environment (for testing)
 ```
 
+### Config Path
+
+The server config **must** be at `/etc/vela/server.toml` for production use. All internal commands (`_deploy`, `_rollback`, `_secret`, `_logs`) default to this path. When the client runs `vela deploy`, it SSHs into the server and executes `vela _deploy <app>` — which reads from the default config path.
+
+If you need a non-default path, pass `--config` to `vela serve` and ensure the same path is accessible to the internal commands.
+
+### Daemon Requirement
+
+The `vela serve` daemon must be running before you deploy. The daemon:
+- Owns all app processes and their lifecycle
+- Listens on a Unix socket at `<data_dir>/vela.sock` (default: `/var/vela/vela.sock`)
+- Receives deploy/rollback commands from the `_deploy` and `_rollback` internal commands
+
+Use `vela setup` to generate a systemd service file, then `sudo systemctl enable --now vela`.
+
 ### Defaults
 
 If no server config file exists, Vela uses sensible defaults:

@@ -219,6 +219,10 @@ impl ServerConfig {
     pub fn logs_dir(&self) -> PathBuf {
         self.data_dir.join("logs")
     }
+
+    pub fn socket_path(&self) -> PathBuf {
+        self.data_dir.join("vela.sock")
+    }
 }
 
 fn default_app_type() -> AppType {

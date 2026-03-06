@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::process::{Child, Command};
 
 use crate::config::AppType;
+
+const DEFAULT_DRAIN_SECONDS: u32 = 10;
 
 #[derive(Debug, Error)]
 pub enum ProcessError {
@@ -12,6 +14,8 @@ pub enum ProcessError {
     StartFailed { app: String, reason: String },
     #[error("app '{0}' is not running")]
     NotRunning(String),
+    #[error("deploy already in progress for '{0}'")]
+    DeployInProgress(String),
     #[error("no port available")]
     NoPortAvailable,
     #[error(transparent)]
@@ -45,7 +49,7 @@ impl ProcessManager {
 
     fn allocate_port(&mut self) -> Result<u16, ProcessError> {
         for port in self.port_range.clone() {
-            if !self.used_ports.contains(&port) {
+            if !self.used_ports.contains(&port) && is_port_available(port) {
                 self.used_ports.insert(port);
                 return Ok(port);
             }
@@ -67,6 +71,12 @@ impl ProcessManager {
         data_dir: &Path,
         env_vars: &[(String, String)],
     ) -> Result<u16, ProcessError> {
+        // Reject if there's already a pending deploy for this app
+        let pending_key = format!("{app_name}:pending");
+        if self.running.contains_key(&pending_key) {
+            return Err(ProcessError::DeployInProgress(app_name.to_string()));
+        }
+
         let port = self.allocate_port()?;
 
         let entrypoint = match app_type {
@@ -81,21 +91,26 @@ impl ProcessManager {
             });
         }
 
-        // Set up log files
+        // Set up log files (append mode — don't truncate existing logs)
         let app_log_dir = self.logs_dir.join(app_name);
         std::fs::create_dir_all(&app_log_dir)?;
-        let stdout_file = std::fs::File::create(app_log_dir.join("stdout.log")).map_err(|e| {
-            ProcessError::StartFailed {
+
+        let stdout_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(app_log_dir.join("stdout.log"))
+            .map_err(|e| ProcessError::StartFailed {
                 app: app_name.to_string(),
-                reason: format!("failed to create stdout log: {e}"),
-            }
-        })?;
-        let stderr_file = std::fs::File::create(app_log_dir.join("stderr.log")).map_err(|e| {
-            ProcessError::StartFailed {
+                reason: format!("failed to open stdout log: {e}"),
+            })?;
+        let stderr_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(app_log_dir.join("stderr.log"))
+            .map_err(|e| ProcessError::StartFailed {
                 app: app_name.to_string(),
-                reason: format!("failed to create stderr log: {e}"),
-            }
-        })?;
+                reason: format!("failed to open stderr log: {e}"),
+            })?;
 
         let mut cmd = match app_type {
             AppType::Binary => Command::new(&entrypoint),
@@ -110,12 +125,12 @@ impl ProcessManager {
             .env("VELA_PORT", port.to_string())
             .env("VELA_DATA_DIR", data_dir)
             .env("VELA_APP_NAME", app_name)
+            .stdin(std::process::Stdio::null())
             .stdout(stdout_file)
             .stderr(stderr_file);
 
         // Set user-defined env vars
         for (key, value) in env_vars {
-            // Substitute ${data_dir} in values
             let resolved = value.replace("${data_dir}", &data_dir.to_string_lossy());
             cmd.env(key, resolved);
         }
@@ -143,25 +158,20 @@ impl ProcessManager {
             child,
         };
 
-        // Store as pending (new instance), don't replace the running one yet
-        // The caller handles the swap after health check
-        self.running
-            .insert(format!("{}:pending", app_name), process);
+        self.running.insert(pending_key, process);
 
         Ok(port)
     }
 
-    /// Promote pending instance to active and stop the old one.
+    /// Promote pending instance to active, gracefully stopping the old one.
     pub async fn swap(&mut self, app_name: &str, drain_seconds: u32) -> Result<(), ProcessError> {
         let pending_key = format!("{app_name}:pending");
         let active_key = app_name.to_string();
 
-        // Stop old instance
+        // Gracefully stop old instance
         if let Some(mut old) = self.running.remove(&active_key) {
             tracing::info!(app = app_name, port = old.port, "draining old instance");
-            tokio::time::sleep(std::time::Duration::from_secs(drain_seconds.into())).await;
-
-            let _ = old.child.kill().await;
+            graceful_stop(&mut old.child, drain_seconds).await;
             self.release_port(old.port);
             tracing::info!(app = app_name, "old instance stopped");
         }
@@ -191,10 +201,10 @@ impl ProcessManager {
         Ok(())
     }
 
-    /// Stop an app entirely.
+    /// Stop an app entirely with graceful shutdown.
     pub async fn stop(&mut self, app_name: &str) -> Result<(), ProcessError> {
         if let Some(mut process) = self.running.remove(app_name) {
-            let _ = process.child.kill().await;
+            graceful_stop(&mut process.child, DEFAULT_DRAIN_SECONDS).await;
             self.release_port(process.port);
             tracing::info!(app = app_name, "stopped");
             Ok(())
@@ -216,7 +226,7 @@ impl ProcessManager {
     }
 
     /// Promote a pending instance directly to active (without swap/drain).
-    /// Used during restore and one-shot _deploy commands.
+    /// Used during restore when there's no old instance to drain.
     pub fn promote_pending_to_active(&mut self, app_name: &str) {
         let pending_key = format!("{app_name}:pending");
         if let Some(process) = self.running.remove(&pending_key) {
@@ -231,6 +241,39 @@ impl ProcessManager {
             .filter(|(k, _)| !k.contains(":pending"))
             .map(|(_, p)| (p.app_name.as_str(), p.port))
             .collect()
+    }
+}
+
+/// Check if a port is available on the system.
+fn is_port_available(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+/// Send SIGTERM, wait for graceful exit, then SIGKILL if needed.
+async fn graceful_stop(child: &mut Child, timeout_seconds: u32) {
+    // Send SIGTERM
+    if let Some(pid) = child.id() {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
+        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+        tracing::debug!(pid, "sent SIGTERM");
+    }
+
+    // Wait for process to exit gracefully
+    match tokio::time::timeout(Duration::from_secs(timeout_seconds.into()), child.wait()).await {
+        Ok(Ok(status)) => {
+            tracing::debug!(?status, "process exited gracefully");
+        }
+        Ok(Err(e)) => {
+            tracing::debug!(err = %e, "error waiting for process");
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout = timeout_seconds,
+                "process did not exit in time, sending SIGKILL"
+            );
+            let _ = child.kill().await;
+        }
     }
 }
 
@@ -249,5 +292,15 @@ mod tests {
         pm.release_port(port1);
         let port3 = pm.allocate_port().unwrap();
         assert_eq!(port3, port1); // reused
+    }
+
+    #[test]
+    fn port_availability_check() {
+        // Bind a port, then check it's not available
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(!is_port_available(port));
+        drop(listener);
+        assert!(is_port_available(port));
     }
 }

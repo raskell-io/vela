@@ -1,5 +1,6 @@
 mod acme;
 mod deploy;
+mod ipc;
 mod process;
 mod proxy;
 mod sandbox;
@@ -17,9 +18,8 @@ use crate::cli::{
     InternalSecretArgs, ServeArgs, SetupArgs,
 };
 use crate::config::{AppType, Manifest, ServerConfig};
-use crate::health::HealthCheck;
 
-/// Start the vela server daemon (proxy + process manager).
+/// Start the vela server daemon (proxy + process manager + IPC).
 pub fn run(args: ServeArgs) -> Result<()> {
     let config = ServerConfig::load(&args.config)?;
 
@@ -94,6 +94,17 @@ pub fn run(args: ServeArgs) -> Result<()> {
             cert_resolver,
         )?;
 
+        // Start the IPC server (Unix socket for _deploy/_rollback communication)
+        let sock_path = config.socket_path();
+        let ipc_pm = process_manager.clone();
+        let ipc_rt = route_table.clone();
+        let ipc_sock = sock_path.clone();
+        tokio::spawn(async move {
+            if let Err(e) = ipc::start_ipc_server(&ipc_sock, ipc_pm, ipc_rt).await {
+                tracing::error!(err = %e, "IPC server exited with error");
+            }
+        });
+
         tracing::info!("vela server ready");
 
         // Wait for shutdown
@@ -110,6 +121,9 @@ pub fn run(args: ServeArgs) -> Result<()> {
         for name in &active_names {
             let _ = pm.stop(name).await;
         }
+
+        // Clean up socket file
+        let _ = std::fs::remove_file(&sock_path);
 
         Ok(())
     })
@@ -211,7 +225,7 @@ pub fn apps(args: AppsArgs) -> Result<()> {
 
 /// Internal deploy command — called by the client over SSH.
 /// Reads the manifest from stdin, extracts the pre-uploaded tarball,
-/// starts the new instance, health checks, and swaps.
+/// then delegates process management to the daemon via IPC.
 pub fn internal_deploy(args: InternalDeployArgs) -> Result<()> {
     let config = ServerConfig::load(&args.config)?;
     let app_name = &args.app;
@@ -286,67 +300,47 @@ pub fn internal_deploy(args: InternalDeployArgs) -> Result<()> {
         }
     }
 
-    // Run the deploy in a tokio runtime
+    // Send deploy request to the daemon via IPC
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
 
     rt.block_on(async {
-        let mut pm = process::ProcessManager::new(config.logs_dir());
+        let sock_path = config.socket_path();
 
-        // If sequential strategy, we don't start the new one until old is stopped.
-        // For blue-green, we start new alongside old.
+        eprintln!("  activating {app_name} (this may take up to 30s for health check)...");
 
-        // Start new instance
-        let port = pm
-            .start(
-                app_name,
-                &release_dir,
-                binary_name,
-                app_type,
-                &data_dir,
-                &env_vars,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to start app: {e}"))?;
+        let response = ipc::send_command(
+            &sock_path,
+            &ipc::DaemonRequest::Deploy {
+                app: app_name.to_string(),
+                release_dir: release_dir.clone(),
+                binary_name: binary_name.to_string(),
+                app_type: app_type.as_str().to_string(),
+                data_dir,
+                env_vars,
+                health_path: health_path.map(String::from),
+                drain_seconds: drain,
+                domain: manifest.app.domain.clone(),
+            },
+        )
+        .await?;
 
-        eprintln!("  started {app_name} on port {port}, checking health...");
+        if response.success {
+            // Update symlink and clean up
+            deploy::link_current(&config.apps_dir(), app_name, &release_id)?;
 
-        // Health check
-        if let Some(health) = health_path {
-            let url = format!("http://127.0.0.1:{port}{health}");
-            let hc = HealthCheck::new(url);
-            match hc.wait_until_healthy().await {
-                Ok(()) => {
-                    eprintln!("  health check passed");
-                }
-                Err(e) => {
-                    eprintln!("  health check failed: {e}");
-                    pm.abort_pending(app_name).await?;
-                    // Clean up failed release directory and tarball
-                    let _ = sandbox::release_sandbox(&release_dir);
-                    let _ = std::fs::remove_dir_all(&release_dir);
-                    let _ = std::fs::remove_file(tarball);
-                    anyhow::bail!("deploy failed: health check did not pass");
-                }
-            }
+            let port = response.port.unwrap_or(0);
+            eprintln!("  release {release_id} is active on port {port}");
+
+            deploy::cleanup_old_releases(&config.apps_dir(), app_name, 5)?;
         } else {
-            // No health check — wait a brief moment and assume OK
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            eprintln!("  no health check configured, assuming healthy");
+            // Clean up failed release
+            let _ = sandbox::release_sandbox(&release_dir);
+            let _ = std::fs::remove_dir_all(&release_dir);
+            let _ = std::fs::remove_file(tarball);
+            anyhow::bail!("deploy failed: {}", response.message);
         }
-
-        // Activate: update symlink
-        deploy::link_current(&config.apps_dir(), app_name, &release_id)?;
-
-        // For sequential: old was already stopped. For blue-green: we'd swap here.
-        // Since _deploy runs as a one-shot (not inside the daemon), we promote directly.
-        pm.promote_pending_to_active(app_name);
-
-        eprintln!("  release {release_id} is active on port {port}");
-
-        // Clean up old releases (keep 5)
-        deploy::cleanup_old_releases(&config.apps_dir(), app_name, 5)?;
 
         // Clean up tarball
         let _ = std::fs::remove_file(tarball);
@@ -383,7 +377,6 @@ pub fn internal_rollback(args: InternalRollbackArgs) -> Result<()> {
     }
 
     let binary_name = app.binary_name.as_deref().unwrap_or(app_name);
-    let app_type = AppType::from_str_loose(&app.app_type);
     let data_dir = deploy::ensure_data_dir(&config.apps_dir(), app_name)?;
     let secrets = state.get_secrets(app_name)?;
 
@@ -392,35 +385,34 @@ pub fn internal_rollback(args: InternalRollbackArgs) -> Result<()> {
         .build()?;
 
     rt.block_on(async {
-        let mut pm = process::ProcessManager::new(config.logs_dir());
+        let sock_path = config.socket_path();
 
-        let port = pm
-            .start(
-                app_name,
-                &release_dir,
-                binary_name,
-                app_type,
-                &data_dir,
-                &secrets,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to start app: {e}"))?;
+        eprintln!("  rolling back {app_name} to {prev_release}...");
 
-        // Health check
-        if let Some(health) = &app.health_path {
-            let url = format!("http://127.0.0.1:{port}{health}");
-            let hc = HealthCheck::new(url);
-            hc.wait_until_healthy()
-                .await
-                .map_err(|e| anyhow::anyhow!("rollback health check failed: {e}"))?;
+        let response = ipc::send_command(
+            &sock_path,
+            &ipc::DaemonRequest::Deploy {
+                app: app_name.to_string(),
+                release_dir: release_dir.clone(),
+                binary_name: binary_name.to_string(),
+                app_type: app.app_type.clone(),
+                data_dir,
+                env_vars: secrets,
+                health_path: app.health_path.clone(),
+                drain_seconds: app.drain_seconds,
+                domain: app.domain.clone(),
+            },
+        )
+        .await?;
+
+        if response.success {
+            deploy::link_current(&config.apps_dir(), app_name, &prev_release)?;
+            let port = response.port.unwrap_or(0);
+            eprintln!("  rolled back {app_name} to {prev_release} on port {port}");
         } else {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            anyhow::bail!("rollback failed: {}", response.message);
         }
 
-        deploy::link_current(&config.apps_dir(), app_name, &prev_release)?;
-        pm.promote_pending_to_active(app_name);
-
-        eprintln!("rolled back {app_name} to {prev_release} on port {port}");
         Ok(())
     })
 }
@@ -479,7 +471,6 @@ pub fn internal_logs(args: InternalLogsArgs) -> Result<()> {
     }
 
     if args.follow {
-        // Use tail -f for following — simplest and most reliable
         let status = std::process::Command::new("tail")
             .args(["-n", &args.lines.to_string(), "-f"])
             .arg(&log_path)

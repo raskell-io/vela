@@ -256,10 +256,7 @@ pub fn apps(args: AppsArgs) -> Result<()> {
     }
 
     if args.verbose {
-        println!(
-            "{:<20} {:<30} {:<20} {}",
-            "NAME", "DOMAIN", "RELEASE", "STATUS"
-        );
+        println!("{:<20} {:<30} {:<20} STATUS", "NAME", "DOMAIN", "RELEASE");
         println!("{}", "-".repeat(85));
     }
 

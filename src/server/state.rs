@@ -16,6 +16,9 @@ pub struct AppConfig {
     pub health_path: Option<String>,
     pub deploy_strategy: String,
     pub drain_seconds: u32,
+    /// Manifest-level environment variables, persisted across restarts.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 /// Runtime info derived from the filesystem.
@@ -116,6 +119,7 @@ impl ServerState {
         health_path: Option<&str>,
         deploy_strategy: &str,
         drain_seconds: u32,
+        env: HashMap<String, String>,
     ) -> Result<()> {
         let app_dir = self.app_dir(name);
         std::fs::create_dir_all(&app_dir)?;
@@ -128,6 +132,7 @@ impl ServerState {
             health_path: health_path.map(Into::into),
             deploy_strategy: deploy_strategy.into(),
             drain_seconds,
+            env,
         };
 
         let toml_str = toml::to_string_pretty(&config).context("failed to serialize app config")?;
@@ -350,6 +355,7 @@ mod tests {
                 Some("/health"),
                 "blue-green",
                 5,
+                HashMap::new(),
             )
             .unwrap();
 
@@ -373,6 +379,7 @@ mod tests {
                 None,
                 "sequential",
                 10,
+                HashMap::new(),
             )
             .unwrap();
 

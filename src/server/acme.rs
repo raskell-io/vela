@@ -60,14 +60,51 @@ impl CertPaths {
     }
 }
 
-/// Check if any domains need certificate provisioning.
-/// Returns domains that don't have valid certs yet.
+/// Check if any domains need certificate provisioning or renewal.
+/// Returns domains that don't have valid certs or whose certs expire soon.
 pub fn domains_needing_certs(data_dir: &Path, domains: &[String]) -> Vec<String> {
     domains
         .iter()
-        .filter(|d| !CertPaths::for_domain(data_dir, d).exists())
+        .filter(|d| {
+            let paths = CertPaths::for_domain(data_dir, d);
+            if !paths.exists() {
+                return true;
+            }
+            // Check if cert expires within 30 days
+            cert_expires_soon(&paths.cert, 30)
+        })
         .cloned()
         .collect()
+}
+
+/// Check if a PEM certificate expires within `days` days.
+fn cert_expires_soon(cert_path: &Path, days: u32) -> bool {
+    use rustls_pemfile::certs;
+
+    let data = match std::fs::read(cert_path) {
+        Ok(d) => d,
+        Err(_) => return true,
+    };
+
+    let certs: Vec<_> = certs(&mut &data[..]).filter_map(|r| r.ok()).collect();
+    let cert = match certs.first() {
+        Some(c) => c,
+        None => return true,
+    };
+
+    // Parse the X.509 cert to check notAfter
+    match x509_parser::parse_x509_certificate(cert.as_ref()) {
+        Ok((_, parsed)) => {
+            let not_after = parsed.validity().not_after.timestamp();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            let threshold = now + (days as i64 * 86400);
+            not_after < threshold
+        }
+        Err(_) => true,
+    }
 }
 
 /// ACME client for automatic certificate provisioning via Let's Encrypt.

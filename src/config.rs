@@ -45,6 +45,16 @@ pub struct DeployConfig {
     /// Deploy strategy
     #[serde(default)]
     pub strategy: DeployStrategy,
+
+    /// Command to run before the app starts (e.g. migrations).
+    /// Runs inside the release directory. Failure aborts the deploy.
+    #[serde(default)]
+    pub pre_start: Option<String>,
+
+    /// Command to run after traffic switches to the new instance.
+    /// Failure is logged but does not roll back.
+    #[serde(default)]
+    pub post_deploy: Option<String>,
 }
 
 impl Default for DeployConfig {
@@ -56,6 +66,8 @@ impl Default for DeployConfig {
             health: None,
             drain: default_drain(),
             strategy: DeployStrategy::BlueGreen,
+            pre_start: None,
+            post_deploy: None,
         }
     }
 }

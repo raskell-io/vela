@@ -28,6 +28,18 @@ pub struct AppProcess {
     pub release_id: String,
     pub port: u16,
     pub child: Child,
+    /// Stored so we can restart the process on crash.
+    pub launch_config: LaunchConfig,
+}
+
+/// Everything needed to (re)start an app process.
+#[derive(Debug, Clone)]
+pub struct LaunchConfig {
+    pub release_dir: PathBuf,
+    pub binary_name: String,
+    pub app_type: AppType,
+    pub data_dir: PathBuf,
+    pub env_vars: Vec<(String, String)>,
 }
 
 pub struct ProcessManager {
@@ -156,6 +168,13 @@ impl ProcessManager {
                 .to_string(),
             port,
             child,
+            launch_config: LaunchConfig {
+                release_dir: release_dir.to_path_buf(),
+                binary_name: binary_name.to_string(),
+                app_type,
+                data_dir: data_dir.to_path_buf(),
+                env_vars: env_vars.to_vec(),
+            },
         };
 
         self.running.insert(pending_key, process);
@@ -241,6 +260,73 @@ impl ProcessManager {
             .filter(|(k, _)| !k.contains(":pending"))
             .map(|(_, p)| (p.app_name.as_str(), p.port))
             .collect()
+    }
+
+    /// Check active processes and restart any that have exited.
+    /// Returns the names of apps that were restarted.
+    pub async fn check_and_restart(&mut self) -> Vec<String> {
+        let mut to_restart: Vec<(String, LaunchConfig)> = Vec::new();
+
+        // Find crashed active processes (not pending)
+        for (key, process) in &mut self.running {
+            if key.contains(":pending") {
+                continue;
+            }
+            // try_wait returns Some(status) if exited, None if still running
+            match process.child.try_wait() {
+                Ok(Some(status)) => {
+                    tracing::warn!(
+                        app = %process.app_name,
+                        port = process.port,
+                        ?status,
+                        "process exited, will restart"
+                    );
+                    to_restart.push((key.clone(), process.launch_config.clone()));
+                }
+                Ok(None) => {} // still running
+                Err(e) => {
+                    tracing::warn!(
+                        app = %process.app_name,
+                        err = %e,
+                        "failed to check process status"
+                    );
+                }
+            }
+        }
+
+        let mut restarted = Vec::new();
+
+        for (key, config) in to_restart {
+            // Remove the dead process and release its port
+            if let Some(dead) = self.running.remove(&key) {
+                self.release_port(dead.port);
+            }
+
+            // Restart on the same port if available, otherwise allocate new
+            match self
+                .start(
+                    &key,
+                    &config.release_dir,
+                    &config.binary_name,
+                    config.app_type,
+                    &config.data_dir,
+                    &config.env_vars,
+                )
+                .await
+            {
+                Ok(port) => {
+                    // Promote from pending to active immediately
+                    self.promote_pending_to_active(&key);
+                    tracing::info!(app = %key, port, "restarted crashed process");
+                    restarted.push(key);
+                }
+                Err(e) => {
+                    tracing::error!(app = %key, err = %e, "failed to restart crashed process");
+                }
+            }
+        }
+
+        restarted
     }
 }
 

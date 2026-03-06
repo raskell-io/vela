@@ -76,11 +76,26 @@ pub fn run(args: ServeArgs) -> Result<()> {
             let cr = resolver.clone();
 
             tokio::spawn(async move {
+                // Initial provisioning
                 if let Err(e) =
                     acme::provision_and_load_certs(&data_dir, &domains, &email, &cs, &cr, staging)
                         .await
                 {
                     tracing::error!(err = %e, "ACME cert provisioning failed");
+                }
+
+                // Check for renewals every 12 hours
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(12 * 3600));
+                interval.tick().await; // skip first immediate tick
+                loop {
+                    interval.tick().await;
+                    tracing::debug!("checking for certificate renewals");
+                    if let Err(e) =
+                        acme::provision_and_load_certs(&data_dir, &domains, &email, &cs, &cr, staging)
+                            .await
+                    {
+                        tracing::error!(err = %e, "ACME cert renewal check failed");
+                    }
                 }
             });
 
@@ -105,6 +120,27 @@ pub fn run(args: ServeArgs) -> Result<()> {
         tokio::spawn(async move {
             if let Err(e) = ipc::start_ipc_server(&ipc_sock, ipc_pm, ipc_rt).await {
                 tracing::error!(err = %e, "IPC server exited with error");
+            }
+        });
+
+        // Spawn process supervision loop (check every 10s, restart crashed processes)
+        let supervision_pm = process_manager.clone();
+        let supervision_rt = route_table.clone();
+        let supervision_state = state::ServerState::open(&config)?;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+                let mut pm = supervision_pm.lock().await;
+                let restarted = pm.check_and_restart().await;
+                // Update route table for restarted apps
+                for app_name in &restarted {
+                    if let Some(port) = pm.active_port(app_name) {
+                        if let Ok(Some(app_config)) = supervision_state.get_app(app_name) {
+                            supervision_rt.set(&app_config.domain, port);
+                        }
+                    }
+                }
             }
         });
 
@@ -161,7 +197,19 @@ async fn restore_apps(
         let binary_name = app.binary_name.as_deref().unwrap_or(&app.name);
         let app_type = AppType::from_str_loose(&app.app_type);
         let data_dir = deploy::ensure_data_dir(&config.apps_dir(), &app.name)?;
+
+        // Merge env: manifest env vars first, then secrets override
         let secrets = state.get_secrets(&app.name)?;
+        let mut env_vars: Vec<(String, String)> = app.env.iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (key, value) in &secrets {
+            if let Some(existing) = env_vars.iter_mut().find(|(k, _)| k == key) {
+                existing.1 = value.clone();
+            } else {
+                env_vars.push((key.clone(), value.clone()));
+            }
+        }
 
         let mut pm = process_manager.lock().await;
         match pm
@@ -171,7 +219,7 @@ async fn restore_apps(
                 binary_name,
                 app_type,
                 &data_dir,
-                &secrets,
+                &env_vars,
             )
             .await
         {
@@ -269,6 +317,7 @@ pub fn internal_deploy(args: InternalDeployArgs) -> Result<()> {
         health_path,
         strategy.as_str(),
         drain,
+        manifest.env.clone(),
     )?;
 
     // Generate release ID and extract
@@ -303,6 +352,31 @@ pub fn internal_deploy(args: InternalDeployArgs) -> Result<()> {
         }
     }
 
+    // Run pre_start hook if configured
+    if let Some(ref pre_start) = manifest.deploy.pre_start {
+        eprintln!("  running pre_start hook...");
+        let status = std::process::Command::new("sh")
+            .args(["-c", pre_start])
+            .current_dir(&release_dir)
+            .envs(env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .env("VELA_DATA_DIR", &data_dir)
+            .env("VELA_APP_NAME", app_name)
+            .status()
+            .context("failed to run pre_start hook")?;
+
+        if !status.success() {
+            let _ = sandbox::release_sandbox(&release_dir);
+            let _ = std::fs::remove_dir_all(&release_dir);
+            let _ = std::fs::remove_file(tarball);
+            anyhow::bail!(
+                "pre_start hook failed with exit code {}",
+                status.code().unwrap_or(-1)
+            );
+        }
+    }
+
+    let post_deploy_cmd = manifest.deploy.post_deploy.clone();
+
     // Send deploy request to the daemon via IPC
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -321,8 +395,8 @@ pub fn internal_deploy(args: InternalDeployArgs) -> Result<()> {
                 binary_name: binary_name.to_string(),
                 app_type: app_type.as_str().to_string(),
                 strategy: strategy.as_str().to_string(),
-                data_dir,
-                env_vars,
+                data_dir: data_dir.clone(),
+                env_vars: env_vars.clone(),
                 health_path: health_path.map(String::from),
                 drain_seconds: drain,
                 domain: manifest.app.domain.clone(),
@@ -338,6 +412,34 @@ pub fn internal_deploy(args: InternalDeployArgs) -> Result<()> {
             eprintln!("  release {release_id} is active on port {port}");
 
             deploy::cleanup_old_releases(&config.apps_dir(), app_name, 5)?;
+
+            // Run post_deploy hook if configured
+            if let Some(ref post_deploy) = post_deploy_cmd {
+                eprintln!("  running post_deploy hook...");
+                let status = std::process::Command::new("sh")
+                    .args(["-c", post_deploy])
+                    .current_dir(&release_dir)
+                    .envs(env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+                    .env("VELA_DATA_DIR", &data_dir)
+                    .env("VELA_APP_NAME", app_name)
+                    .env("PORT", port.to_string())
+                    .status();
+
+                match status {
+                    Ok(s) if s.success() => {
+                        eprintln!("  post_deploy hook completed");
+                    }
+                    Ok(s) => {
+                        eprintln!(
+                            "  warning: post_deploy hook exited with code {}",
+                            s.code().unwrap_or(-1)
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("  warning: post_deploy hook failed: {e}");
+                    }
+                }
+            }
         } else {
             // Clean up failed release
             let _ = sandbox::release_sandbox(&release_dir);

@@ -139,8 +139,8 @@ impl AcmeClient {
         let mut challenge_tokens: Vec<String> = Vec::new();
         let mut authorizations = order.authorizations();
         while let Some(result) = authorizations.next().await {
-            let mut auth = result
-                .map_err(|e| anyhow::anyhow!("failed to get ACME authorization: {e}"))?;
+            let mut auth =
+                result.map_err(|e| anyhow::anyhow!("failed to get ACME authorization: {e}"))?;
 
             match auth.status {
                 AuthorizationStatus::Valid => continue,
@@ -179,13 +179,10 @@ impl AcmeClient {
             }
         };
 
-        let status = order
-            .poll_ready(&retries)
-            .await
-            .map_err(|e| {
-                cleanup_tokens();
-                anyhow::anyhow!("ACME order failed: {e}")
-            })?;
+        let status = order.poll_ready(&retries).await.map_err(|e| {
+            cleanup_tokens();
+            anyhow::anyhow!("ACME order failed: {e}")
+        })?;
 
         tracing::info!(domain, ?status, "ACME order ready");
 

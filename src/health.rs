@@ -5,6 +5,7 @@ use thiserror::Error;
 pub enum HealthError {
     #[error("health check failed after {attempts} attempts: {last_error}")]
     Failed { attempts: u32, last_error: String },
+    #[allow(dead_code)]
     #[error("health check timed out after {0:?}")]
     Timeout(Duration),
 }

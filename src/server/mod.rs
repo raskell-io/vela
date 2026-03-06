@@ -61,10 +61,10 @@ pub fn run(args: ServeArgs) -> Result<()> {
 
             for domain in &domains {
                 let paths = acme::CertPaths::for_domain(&config.data_dir, domain);
-                if paths.exists() {
-                    if let Err(e) = resolver.load_cert(domain, &paths.cert, &paths.key) {
-                        tracing::warn!(domain, err = %e, "failed to load existing cert");
-                    }
+                if paths.exists()
+                    && let Err(e) = resolver.load_cert(domain, &paths.cert, &paths.key)
+                {
+                    tracing::warn!(domain, err = %e, "failed to load existing cert");
                 }
             }
 
@@ -136,10 +136,10 @@ pub fn run(args: ServeArgs) -> Result<()> {
                 let restarted = pm.check_and_restart().await;
                 // Update route table for restarted apps
                 for app_name in &restarted {
-                    if let Some(port) = pm.active_port(app_name) {
-                        if let Ok(Some(app_config)) = supervision_state.get_app(app_name) {
-                            supervision_rt.set(&app_config.domain, port);
-                        }
+                    if let Some(port) = pm.active_port(app_name)
+                        && let Ok(Some(app_config)) = supervision_state.get_app(app_name)
+                    {
+                        supervision_rt.set(&app_config.domain, port);
                     }
                 }
             }
@@ -634,7 +634,7 @@ WantedBy=multi-user.target
     let service_path = Path::new("/etc/systemd/system/vela.service");
 
     // Check if we can write to systemd directory
-    if service_path.parent().map_or(false, |p| p.exists()) {
+    if service_path.parent().is_some_and(|p| p.exists()) {
         std::fs::write(service_path, &unit).context("failed to write systemd service file")?;
         println!("wrote {}", service_path.display());
 

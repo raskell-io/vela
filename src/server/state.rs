@@ -110,6 +110,7 @@ impl ServerState {
         Ok(apps)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn register_app(
         &self,
         name: &str,

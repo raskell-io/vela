@@ -40,6 +40,7 @@ impl RouteTable {
             .copied()
     }
 
+    #[allow(dead_code)]
     pub fn all(&self) -> HashMap<String, u16> {
         self.routes
             .read()
@@ -88,10 +89,10 @@ pub fn start_proxy(
 
         if let Some(resolver) = cert_resolver {
             // Dynamic cert resolution (ACME or mixed)
-            if let (Some(cert_path), Some(key_path)) = (&tls_config.cert, &tls_config.key) {
-                if let Err(e) = resolver.load_cert("*", cert_path, key_path) {
-                    tracing::warn!(err = %e, "failed to load static TLS cert into resolver");
-                }
+            if let (Some(cert_path), Some(key_path)) = (&tls_config.cert, &tls_config.key)
+                && let Err(e) = resolver.load_cert("*", cert_path, key_path)
+            {
+                tracing::warn!(err = %e, "failed to load static TLS cert into resolver");
             }
 
             tokio::spawn(async move {
@@ -378,10 +379,10 @@ async fn forward_request(
 
     // Forward headers (except Host)
     for (key, value) in &parts.headers {
-        if key != hyper::header::HOST {
-            if let Ok(v) = value.to_str() {
-                upstream_req = upstream_req.header(key.as_str(), v);
-            }
+        if key != hyper::header::HOST
+            && let Ok(v) = value.to_str()
+        {
+            upstream_req = upstream_req.header(key.as_str(), v);
         }
     }
 
@@ -412,7 +413,7 @@ async fn forward_request(
             let resp = Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
                 .body(BoxBody::new(hyper::body::Bytes::from(
-                    "502 Bad Gateway: upstream error\n".to_string(),
+                    "502 Bad Gateway: upstream error\n",
                 )))
                 .unwrap();
             Ok(resp)

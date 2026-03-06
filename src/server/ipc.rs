@@ -12,6 +12,21 @@ use super::proxy::RouteTable;
 use crate::config::{AppType, DeployStrategy};
 use crate::health::HealthCheck;
 
+/// Shared parameters for deploy operations.
+struct DeployParams<'a> {
+    process_manager: &'a Arc<Mutex<ProcessManager>>,
+    route_table: &'a RouteTable,
+    app: &'a str,
+    release_dir: &'a Path,
+    binary_name: &'a str,
+    app_type: AppType,
+    data_dir: &'a Path,
+    env_vars: &'a [(String, String)],
+    health_path: Option<&'a str>,
+    drain_seconds: u32,
+    domain: &'a str,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "command")]
 pub enum DaemonRequest {
@@ -132,6 +147,7 @@ async fn handle_connection(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_deploy(
     process_manager: &Arc<Mutex<ProcessManager>>,
     route_table: &RouteTable,
@@ -146,65 +162,43 @@ async fn handle_deploy(
     drain_seconds: u32,
     domain: &str,
 ) -> DaemonResponse {
-    let app_type_enum = AppType::from_str_loose(app_type);
-    let strategy_enum = DeployStrategy::from_str_loose(strategy);
+    let params = DeployParams {
+        process_manager,
+        route_table,
+        app,
+        release_dir,
+        binary_name,
+        app_type: AppType::from_str_loose(app_type),
+        data_dir,
+        env_vars,
+        health_path,
+        drain_seconds,
+        domain,
+    };
 
-    match strategy_enum {
-        DeployStrategy::BlueGreen => {
-            deploy_blue_green(
-                process_manager,
-                route_table,
-                app,
-                release_dir,
-                binary_name,
-                app_type_enum,
-                data_dir,
-                env_vars,
-                health_path,
-                drain_seconds,
-                domain,
-            )
-            .await
-        }
-        DeployStrategy::Sequential => {
-            deploy_sequential(
-                process_manager,
-                route_table,
-                app,
-                release_dir,
-                binary_name,
-                app_type_enum,
-                data_dir,
-                env_vars,
-                health_path,
-                drain_seconds,
-                domain,
-            )
-            .await
-        }
+    match DeployStrategy::from_str_loose(strategy) {
+        DeployStrategy::BlueGreen => deploy_blue_green(&params).await,
+        DeployStrategy::Sequential => deploy_sequential(&params).await,
     }
 }
 
 /// Blue-green: start new → health check → swap traffic → drain old.
 /// Zero downtime. Two instances run briefly during the swap.
-async fn deploy_blue_green(
-    process_manager: &Arc<Mutex<ProcessManager>>,
-    route_table: &RouteTable,
-    app: &str,
-    release_dir: &Path,
-    binary_name: &str,
-    app_type: AppType,
-    data_dir: &Path,
-    env_vars: &[(String, String)],
-    health_path: Option<&str>,
-    drain_seconds: u32,
-    domain: &str,
-) -> DaemonResponse {
+async fn deploy_blue_green(params: &DeployParams<'_>) -> DaemonResponse {
+    let app = params.app;
+
     // Start new instance alongside old
     let port = {
-        let mut pm = process_manager.lock().await;
+        let mut pm = params.process_manager.lock().await;
         match pm
-            .start(app, release_dir, binary_name, app_type, data_dir, env_vars)
+            .start(
+                app,
+                params.release_dir,
+                params.binary_name,
+                params.app_type,
+                params.data_dir,
+                params.env_vars,
+            )
             .await
         {
             Ok(port) => port,
@@ -226,23 +220,24 @@ async fn deploy_blue_green(
     );
 
     // Health check
-    if let Err(resp) = run_health_check(process_manager, app, port, health_path).await {
+    if let Err(resp) = run_health_check(params.process_manager, app, port, params.health_path).await
+    {
         return resp;
     }
 
     // Swap: drain old instance, promote new
     {
-        let mut pm = process_manager.lock().await;
-        if let Err(e) = pm.swap(app, drain_seconds).await {
+        let mut pm = params.process_manager.lock().await;
+        if let Err(e) = pm.swap(app, params.drain_seconds).await {
             tracing::warn!(app, err = %e, "swap warning (may be first deploy)");
         }
     }
 
-    route_table.set(domain, port);
+    params.route_table.set(params.domain, port);
     tracing::info!(
         app,
         port,
-        domain,
+        domain = params.domain,
         strategy = "blue-green",
         "deploy activated"
     );
@@ -256,24 +251,14 @@ async fn deploy_blue_green(
 
 /// Sequential: stop old → start new → health check → activate.
 /// Sub-second blip. Use for SQLite apps to avoid write contention.
-async fn deploy_sequential(
-    process_manager: &Arc<Mutex<ProcessManager>>,
-    route_table: &RouteTable,
-    app: &str,
-    release_dir: &Path,
-    binary_name: &str,
-    app_type: AppType,
-    data_dir: &Path,
-    env_vars: &[(String, String)],
-    health_path: Option<&str>,
-    _drain_seconds: u32,
-    domain: &str,
-) -> DaemonResponse {
+async fn deploy_sequential(params: &DeployParams<'_>) -> DaemonResponse {
+    let app = params.app;
+
     // Stop old instance first (removes route so no traffic during gap)
     {
-        let mut pm = process_manager.lock().await;
+        let mut pm = params.process_manager.lock().await;
         if pm.active_port(app).is_some() {
-            route_table.remove(domain);
+            params.route_table.remove(params.domain);
             tracing::info!(
                 app,
                 strategy = "sequential",
@@ -287,9 +272,16 @@ async fn deploy_sequential(
 
     // Start new instance
     let port = {
-        let mut pm = process_manager.lock().await;
+        let mut pm = params.process_manager.lock().await;
         match pm
-            .start(app, release_dir, binary_name, app_type, data_dir, env_vars)
+            .start(
+                app,
+                params.release_dir,
+                params.binary_name,
+                params.app_type,
+                params.data_dir,
+                params.env_vars,
+            )
             .await
         {
             Ok(port) => port,
@@ -311,21 +303,22 @@ async fn deploy_sequential(
     );
 
     // Health check
-    if let Err(resp) = run_health_check(process_manager, app, port, health_path).await {
+    if let Err(resp) = run_health_check(params.process_manager, app, port, params.health_path).await
+    {
         return resp;
     }
 
     // Promote pending to active (no swap needed — old was already stopped)
     {
-        let mut pm = process_manager.lock().await;
+        let mut pm = params.process_manager.lock().await;
         pm.promote_pending_to_active(app);
     }
 
-    route_table.set(domain, port);
+    params.route_table.set(params.domain, port);
     tracing::info!(
         app,
         port,
-        domain,
+        domain = params.domain,
         strategy = "sequential",
         "deploy activated"
     );

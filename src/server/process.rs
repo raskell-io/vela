@@ -238,6 +238,7 @@ impl ProcessManager {
     }
 
     /// Get the port for a pending app (during deploy).
+    #[allow(dead_code)]
     pub fn pending_port(&self, app_name: &str) -> Option<u16> {
         self.running
             .get(&format!("{app_name}:pending"))

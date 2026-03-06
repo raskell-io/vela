@@ -330,6 +330,7 @@ impl CertResolver {
     }
 
     /// Check if a certificate is loaded for a domain.
+    #[allow(dead_code)]
     pub fn has_cert(&self, domain: &str) -> bool {
         self.certs
             .read()

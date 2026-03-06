@@ -3,10 +3,12 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum DeployError {
+    #[allow(dead_code)]
     #[error("app '{0}' not found")]
     AppNotFound(String),
     #[error("release directory not found: {0}")]
     ReleaseNotFound(String),
+    #[allow(dead_code)]
     #[error("health check failed: {0}")]
     HealthCheckFailed(String),
     #[error(transparent)]

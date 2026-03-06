@@ -26,14 +26,14 @@ Vela uploads your binary (or BEAM release), starts it on a fresh port, runs a he
 ┌─────────────────────────────────────────────┐
 │  Your server                                │
 │                                             │
-│  Vela                                       │
+│  Vela daemon                                │
 │  ├── Reverse proxy (:80/:443, auto-TLS)     │
 │  ├── Process manager (start, health, swap)  │
-│  └── State manager                          │
+│  └── IPC socket (/var/vela/vela.sock)       │
 │                                             │
 │  Apps                                       │
-│  ├── next.ai         → :10001               │
-│  └── giga.app        → :10002               │
+│  ├── cyanea.bio      → :10001              │
+│  └── archipelag.io   → :10002              │
 └─────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────┐
@@ -44,21 +44,15 @@ Vela uploads your binary (or BEAM release), starts it on a fresh port, runs a he
 ```
 
 - **One binary** — same `vela` runs on server and laptop
-- **Embedded proxy** — hyper-based reverse proxy with TLS support
+- **Embedded proxy** — hyper-based reverse proxy with auto-TLS via Let's Encrypt
 - **SSH is the control plane** — no tokens, no API keys, no custom auth
-- **SQLite-aware** — persistent data directories survive deploys
+- **SQLite-aware** — persistent data directories survive deploys; sequential strategy avoids write contention
 - **Rust and Elixir** — deploy compiled binaries or BEAM releases
 
 ## Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/raskell-io/vela/main/install.sh | bash
-```
-
-Or specify a version and install directory:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/raskell-io/vela/main/install.sh | bash -s -- --version v0.1.0 --to ~/.local/bin
 ```
 
 Binaries are available for Linux (amd64, arm64) and macOS (amd64, arm64).
@@ -71,8 +65,23 @@ Binaries are available for Linux (amd64, arm64) and macOS (amd64, arm64).
 # Install vela on your server
 curl -fsSL https://raw.githubusercontent.com/raskell-io/vela/main/install.sh | bash
 
-# Start
-vela serve
+# Create config
+mkdir -p /etc/vela
+cat > /etc/vela/server.toml <<'EOF'
+data_dir = "/var/vela"
+
+[proxy]
+http_port = 80
+https_port = 443
+
+[tls]
+acme_email = "you@example.com"
+staging = true  # Use staging first, switch to false once verified
+EOF
+
+# Install systemd service and start
+vela setup
+sudo systemctl enable --now vela
 ```
 
 ### 2. Project Setup
@@ -80,7 +89,7 @@ vela serve
 ```bash
 cd my-app
 vela init --name my-app --domain my-app.example.com
-# Edit Vela.toml → set deploy.server
+# Edit Vela.toml → set deploy.server = "root@your-server-ip"
 ```
 
 ### 3. Deploy
@@ -115,73 +124,78 @@ strategy = "blue-green"      # or "sequential" for SQLite apps
 
 [env]
 DATABASE_PATH = "${data_dir}/my-app.db"
-
-[resources]
-memory = "512M"
+SECRET_KEY_BASE = "${secret:SECRET_KEY_BASE}"
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `vela serve` | Start the server (Linux) |
+| `vela serve` | Start the server daemon (Linux) |
+| `vela setup` | Generate and install systemd service |
 | `vela init` | Generate a Vela.toml |
 | `vela deploy <artifact>` | Deploy an app |
 | `vela status` | Show running apps |
 | `vela logs <app> [-f]` | Tail app logs |
-| `vela rollback <app>` | Roll back to previous release |
+| `vela rollback [<app>]` | Roll back to previous release |
 | `vela secret set <app> KEY=VALUE` | Set a secret |
+| `vela secret list <app>` | List secret keys |
+| `vela secret remove <app> KEY` | Remove a secret |
 | `vela apps` | List apps (server-side) |
 
 ## Deploy Strategies
 
-**Blue-green** (default) — Two instances run briefly during the swap. True zero downtime.
+**Blue-green** (default) — New instance starts alongside old. After health check passes, traffic swaps and old instance drains. True zero downtime.
 
-**Sequential** — Old stops, new starts. Sub-second blip. Use for SQLite apps to avoid write contention.
+**Sequential** — Old instance stops, new instance starts. Sub-second blip. Use for SQLite apps to avoid write contention during the overlap window.
 
 ## Your App Needs To
 
-1. Listen on `$PORT` (Vela assigns it)
-2. Expose a health endpoint (return 200 when ready)
-3. Handle `SIGTERM` for graceful shutdown
-4. Use `$VELA_DATA_DIR` for persistent files (databases, uploads)
+1. **Listen on `$PORT`** — Vela assigns a random port (10000-20000). Your app must read the `PORT` env var and bind to it.
+2. **Respond on your health path** — If you set `health = "/health"`, return HTTP 200 within 30 seconds of startup.
+3. **Handle `SIGTERM`** — Vela sends SIGTERM for graceful shutdown, then SIGKILL after a timeout.
+4. **Use `$VELA_DATA_DIR` for persistent files** — databases, uploads, anything that survives deploys.
 
 ## Documentation
 
-- [Getting Started](docs/getting-started.md)
-- [Configuration](docs/configuration.md)
-- [Deploy Lifecycle](docs/deploy-lifecycle.md)
-- [Architecture](docs/architecture.md)
-- [Elixir/Phoenix Guide](docs/elixir-phoenix.md)
-- [Cloudflare Integration](docs/cloudflare.md)
+- [Getting Started](docs/getting-started.md) — first install and deploy walkthrough
+- [Production Checklist](docs/production-checklist.md) — pre-flight checks, troubleshooting, ACME staging workflow
+- [Configuration](docs/configuration.md) — Vela.toml and server.toml reference
+- [Deploy Lifecycle](docs/deploy-lifecycle.md) — what happens during a deploy
+- [Architecture](docs/architecture.md) — system design and internals
+- [Elixir/Phoenix Guide](docs/elixir-phoenix.md) — deploying BEAM releases
+- [Cloudflare Integration](docs/cloudflare.md) — using Cloudflare with Vela
 
 ## Status
 
-Core functionality is built and working:
+All core functionality is built, tested, and working:
 
 - [x] Single binary (server + client)
-- [x] SSH-based deploy pipeline (upload → extract → health check → swap)
-- [x] Hyper-based reverse proxy with TLS (Cloudflare Origin Certs)
+- [x] SSH-based deploy pipeline (tarball upload → extract → health check → swap)
+- [x] Reverse proxy with domain-based routing (hyper)
+- [x] Auto-TLS via Let's Encrypt (ACME HTTP-01 with SNI-based cert resolution)
+- [x] Static TLS support (Cloudflare Origin Certs, custom certs)
 - [x] Blue-green and sequential deploy strategies
-- [x] Process manager with port allocation and graceful shutdown
+- [x] Process manager with port allocation and graceful shutdown (SIGTERM → SIGKILL)
+- [x] IPC daemon architecture (Unix socket for deploy coordination)
 - [x] Filesystem-backed state (no database dependency)
-- [x] Secret management (per-app, mode 0600)
+- [x] Secret management (per-app, file-backed, mode 0600)
+- [x] Environment variable substitution (`${data_dir}`, `${secret:KEY}`)
 - [x] Rollback to previous release
-- [x] App restore on server restart
-- [x] Elixir/Phoenix BEAM release support
-- [x] CI/CD pipeline with multi-platform release builds
-- [x] Install script
-
-- [x] Let's Encrypt auto-TLS (ACME HTTP-01 with SNI-based cert resolution)
-- [x] systemd service generation (`vela setup`)
-- [x] Log file capture and streaming (`vela logs -f`)
+- [x] App restore on daemon restart
+- [x] Log capture and streaming (`vela logs -f`)
 - [x] Release sandbox (read-only release directories)
+- [x] Elixir/Phoenix BEAM release support
+- [x] systemd service generation with hardening (`vela setup`)
+- [x] CI/CD pipeline with multi-platform release builds
+- [x] Install script (auto-detects platform)
 
 Coming next:
 
-- [ ] Process isolation (namespaces, cgroups v2)
-- [ ] Litestream integration for SQLite backups
+- [ ] Process isolation (Linux namespaces, cgroups v2)
+- [ ] Resource limits (memory, CPU weight)
 - [ ] Certificate auto-renewal
+- [ ] Litestream integration for SQLite backups
 - [ ] Multi-server deploys
 
 ## Building from Source
@@ -190,17 +204,6 @@ Coming next:
 # Requires Rust 1.93+
 cargo install --path .
 ```
-
-## Release Process
-
-Tag a version to trigger the release pipeline:
-
-```bash
-git tag v0.1.0
-git push --tags
-```
-
-GitHub Actions builds binaries for all platforms and attaches them to the release with checksums.
 
 ## License
 

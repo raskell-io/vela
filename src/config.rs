@@ -216,10 +216,6 @@ impl ServerConfig {
         self.data_dir.join("secrets")
     }
 
-    pub fn db_path(&self) -> PathBuf {
-        self.data_dir.join("vela.db")
-    }
-
     pub fn logs_dir(&self) -> PathBuf {
         self.data_dir.join("logs")
     }

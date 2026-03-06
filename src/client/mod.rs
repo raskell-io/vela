@@ -93,9 +93,8 @@ pub fn status(args: StatusArgs) -> Result<()> {
 
 pub fn logs(args: LogsArgs) -> Result<()> {
     let server = resolve_server(args.server, &args.manifest)?;
-    let unit = format!("vela-app-{}", args.app);
     let lines = args.lines.to_string();
-    let mut cmd = vec!["journalctl", "-u", &unit, "-n", &lines];
+    let mut cmd = vec!["vela", "_logs", &args.app, "-n", &lines];
     if args.follow {
         cmd.push("-f");
     }

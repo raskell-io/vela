@@ -55,6 +55,14 @@ pub enum Command {
     #[command(hide = true)]
     #[clap(name = "_secret")]
     InternalSecret(InternalSecretArgs),
+
+    /// [internal] Read app logs on the server
+    #[command(hide = true)]
+    #[clap(name = "_logs")]
+    InternalLogs(InternalLogsArgs),
+
+    /// Generate a systemd service file for vela
+    Setup(SetupArgs),
 }
 
 // ---------------------------------------------------------------------------
@@ -250,4 +258,33 @@ pub enum InternalSecretAction {
         #[arg(short, long, default_value = "/etc/vela/server.toml")]
         config: PathBuf,
     },
+}
+
+#[derive(clap::Args)]
+pub struct InternalLogsArgs {
+    /// App name
+    pub app: String,
+
+    /// Number of lines to show
+    #[arg(short = 'n', long, default_value = "100")]
+    pub lines: u32,
+
+    /// Follow log output
+    #[arg(short, long)]
+    pub follow: bool,
+
+    /// Show stderr instead of stdout
+    #[arg(long)]
+    pub stderr: bool,
+
+    /// Path to server config file
+    #[arg(short, long, default_value = "/etc/vela/server.toml")]
+    pub config: PathBuf,
+}
+
+#[derive(clap::Args)]
+pub struct SetupArgs {
+    /// Path to server config file
+    #[arg(short, long, default_value = "/etc/vela/server.toml")]
+    pub config: PathBuf,
 }

@@ -74,5 +74,21 @@ fn main() -> Result<()> {
         cli::Command::InternalSecret(_) => {
             anyhow::bail!("_secret is a server-side command (Linux only)")
         }
+
+        #[cfg(target_os = "linux")]
+        cli::Command::InternalLogs(args) => server::internal_logs(args),
+
+        #[cfg(not(target_os = "linux"))]
+        cli::Command::InternalLogs(_) => {
+            anyhow::bail!("_logs is a server-side command (Linux only)")
+        }
+
+        #[cfg(target_os = "linux")]
+        cli::Command::Setup(args) => server::setup(args),
+
+        #[cfg(not(target_os = "linux"))]
+        cli::Command::Setup(_) => {
+            anyhow::bail!("vela setup is only supported on Linux")
+        }
     }
 }

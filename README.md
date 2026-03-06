@@ -172,13 +172,16 @@ Core functionality is built and working:
 - [x] CI/CD pipeline with multi-platform release builds
 - [x] Install script
 
+- [x] Let's Encrypt auto-TLS (ACME HTTP-01 with SNI-based cert resolution)
+- [x] systemd service generation (`vela setup`)
+- [x] Log file capture and streaming (`vela logs -f`)
+- [x] Release sandbox (read-only release directories)
+
 Coming next:
 
-- [ ] Let's Encrypt auto-TLS (ACME)
-- [ ] systemd service generation
 - [ ] Process isolation (namespaces, cgroups v2)
 - [ ] Litestream integration for SQLite backups
-- [ ] Log streaming (`vela logs -f`)
+- [ ] Certificate auto-renewal
 - [ ] Multi-server deploys
 
 ## Building from Source

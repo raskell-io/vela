@@ -27,6 +27,11 @@ rustls-pemfile = "2"
 # HTTP client (for health checks and proxy forwarding)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
+# ACME (Let's Encrypt)
+instant-acme = "0.8"
+rcgen = "0.14"
+base64 = "0.22"
+
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 toml = "1.0"

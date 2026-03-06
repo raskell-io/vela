@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use super::acme::{CertResolver, ChallengeStore};
 use crate::config::ServerConfig;
 
 /// Routing table: domain → upstream port.
@@ -53,35 +54,56 @@ impl RouteTable {
 /// routes requests by Host header to upstream app ports via the RouteTable.
 ///
 /// Returns a handle that keeps the proxy alive.
-pub fn start_proxy(config: &ServerConfig, route_table: RouteTable) -> anyhow::Result<ProxyHandle> {
-    // Pingora's Server requires running in the main thread context.
-    // For now, we start a simple hyper-based reverse proxy that does
-    // Host-header routing. This avoids Pingora's threading model issues
-    // with tokio and keeps things simple for v1.
-    //
-    // The proxy runs as a tokio task inside the existing runtime.
-
+pub fn start_proxy(
+    config: &ServerConfig,
+    route_table: RouteTable,
+    challenge_store: ChallengeStore,
+    cert_resolver: Option<Arc<CertResolver>>,
+) -> anyhow::Result<ProxyHandle> {
     let http_port = config.proxy.http_port;
-    let tls_config = config.tls.clone();
     let rt = route_table.clone();
+    let cs = challenge_store.clone();
 
     tokio::spawn(async move {
-        if let Err(e) = run_http_proxy(http_port, rt).await {
+        if let Err(e) = run_http_proxy(http_port, rt, cs).await {
             tracing::error!(err = %e, "HTTP proxy exited with error");
         }
     });
 
-    if tls_config.cert.is_some() && tls_config.key.is_some() {
+    // Start HTTPS proxy if we have either static certs or a dynamic cert resolver
+    let tls_config = config.tls.clone();
+    let has_static_tls = tls_config.cert.is_some() && tls_config.key.is_some();
+
+    if has_static_tls || cert_resolver.is_some() {
         let https_port = config.proxy.https_port;
         let rt2 = route_table.clone();
-        let cert_path = tls_config.cert.clone().unwrap();
-        let key_path = tls_config.key.clone().unwrap();
 
-        tokio::spawn(async move {
-            if let Err(e) = run_https_proxy(https_port, rt2, &cert_path, &key_path).await {
-                tracing::error!(err = %e, "HTTPS proxy exited with error");
+        if let Some(resolver) = cert_resolver {
+            // Dynamic cert resolution (ACME or mixed)
+            // Also load static certs into the resolver if configured
+            if let (Some(cert_path), Some(key_path)) = (&tls_config.cert, &tls_config.key) {
+                // Load static cert as a wildcard/default — use "*" as domain
+                if let Err(e) = resolver.load_cert("*", cert_path, key_path) {
+                    tracing::warn!(err = %e, "failed to load static TLS cert into resolver");
+                }
             }
-        });
+
+            tokio::spawn(async move {
+                if let Err(e) = run_https_proxy_dynamic(https_port, rt2, resolver).await {
+                    tracing::error!(err = %e, "HTTPS proxy exited with error");
+                }
+            });
+        } else {
+            // Static cert only (no ACME)
+            let cert_path = tls_config.cert.clone().unwrap();
+            let key_path = tls_config.key.clone().unwrap();
+
+            tokio::spawn(async move {
+                if let Err(e) = run_https_proxy(https_port, rt2, &cert_path, &key_path).await {
+                    tracing::error!(err = %e, "HTTPS proxy exited with error");
+                }
+            });
+        }
 
         tracing::info!(http_port, https_port, "proxy started (HTTP + HTTPS)");
     } else {
@@ -107,18 +129,24 @@ use tokio::net::TcpListener;
 
 type BoxBody = http_body_util::Full<hyper::body::Bytes>;
 
-async fn run_http_proxy(port: u16, route_table: RouteTable) -> anyhow::Result<()> {
+async fn run_http_proxy(
+    port: u16,
+    route_table: RouteTable,
+    challenge_store: ChallengeStore,
+) -> anyhow::Result<()> {
     let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     tracing::info!(port, "HTTP proxy listening");
 
     loop {
         let (stream, addr) = listener.accept().await?;
         let rt = route_table.clone();
+        let cs = challenge_store.clone();
 
         tokio::spawn(async move {
             let service = service_fn(move |req: Request<Incoming>| {
                 let rt = rt.clone();
-                async move { handle_request(req, &rt).await }
+                let cs = cs.clone();
+                async move { handle_request(req, &rt, &cs).await }
             });
 
             if let Err(e) = http1::Builder::new()
@@ -149,7 +177,7 @@ async fn run_https_proxy(
 
     let acceptor = TlsAcceptor::from(Arc::new(tls_config));
     let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await?;
-    tracing::info!(port, "HTTPS proxy listening");
+    tracing::info!(port, "HTTPS proxy listening (static cert)");
 
     loop {
         let (stream, addr) = listener.accept().await?;
@@ -167,7 +195,53 @@ async fn run_https_proxy(
 
             let service = service_fn(move |req: Request<Incoming>| {
                 let rt = rt.clone();
-                async move { handle_request(req, &rt).await }
+                let cs = ChallengeStore::new(); // HTTPS doesn't need challenges
+                async move { handle_request(req, &rt, &cs).await }
+            });
+
+            if let Err(e) = http1::Builder::new()
+                .serve_connection(TokioIo::new(tls_stream), service)
+                .await
+            {
+                tracing::debug!(addr = %addr, err = %e, "connection error");
+            }
+        });
+    }
+}
+
+async fn run_https_proxy_dynamic(
+    port: u16,
+    route_table: RouteTable,
+    cert_resolver: Arc<CertResolver>,
+) -> anyhow::Result<()> {
+    use tokio_rustls::TlsAcceptor;
+
+    let tls_config = tokio_rustls::rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_cert_resolver(cert_resolver);
+
+    let acceptor = TlsAcceptor::from(Arc::new(tls_config));
+    let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+    tracing::info!(port, "HTTPS proxy listening (dynamic certs)");
+
+    loop {
+        let (stream, addr) = listener.accept().await?;
+        let acceptor = acceptor.clone();
+        let rt = route_table.clone();
+
+        tokio::spawn(async move {
+            let tls_stream = match acceptor.accept(stream).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::debug!(addr = %addr, err = %e, "TLS handshake failed");
+                    return;
+                }
+            };
+
+            let service = service_fn(move |req: Request<Incoming>| {
+                let rt = rt.clone();
+                let cs = ChallengeStore::new();
+                async move { handle_request(req, &rt, &cs).await }
             });
 
             if let Err(e) = http1::Builder::new()
@@ -183,7 +257,22 @@ async fn run_https_proxy(
 async fn handle_request(
     req: Request<Incoming>,
     route_table: &RouteTable,
+    challenge_store: &ChallengeStore,
 ) -> Result<Response<BoxBody>, hyper::Error> {
+    // Serve ACME HTTP-01 challenges
+    let path = req.uri().path().to_string();
+    if path.starts_with("/.well-known/acme-challenge/") {
+        let token = path.trim_start_matches("/.well-known/acme-challenge/");
+        if let Some(key_auth) = challenge_store.get(token) {
+            tracing::info!(token, "serving ACME challenge");
+            return Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/plain")
+                .body(BoxBody::new(hyper::body::Bytes::from(key_auth)))
+                .unwrap());
+        }
+    }
+
     // Extract host from Host header (owned to avoid borrowing req)
     let host = req
         .headers()

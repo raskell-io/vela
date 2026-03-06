@@ -1,6 +1,8 @@
+mod acme;
 mod deploy;
 mod process;
 mod proxy;
+mod sandbox;
 mod state;
 
 use std::io::Read as _;
@@ -11,8 +13,8 @@ use anyhow::{Context, Result};
 use tokio::sync::Mutex;
 
 use crate::cli::{
-    AppsArgs, InternalDeployArgs, InternalRollbackArgs, InternalSecretAction, InternalSecretArgs,
-    ServeArgs,
+    AppsArgs, InternalDeployArgs, InternalLogsArgs, InternalRollbackArgs, InternalSecretAction,
+    InternalSecretArgs, ServeArgs, SetupArgs,
 };
 use crate::config::{AppType, Manifest, ServerConfig};
 use crate::health::HealthCheck;
@@ -40,13 +42,57 @@ pub fn run(args: ServeArgs) -> Result<()> {
     rt.block_on(async {
         let state = state::ServerState::open(&config)?;
         let route_table = proxy::RouteTable::new();
-        let process_manager = Arc::new(Mutex::new(process::ProcessManager::new()));
+        let challenge_store = acme::ChallengeStore::new();
+        let process_manager = Arc::new(Mutex::new(process::ProcessManager::new(config.logs_dir())));
 
         // Restore previously active apps
         restore_apps(&config, &state, &process_manager, &route_table).await?;
 
+        // Set up ACME / dynamic TLS if configured
+        let cert_resolver = if config.tls.acme_email.is_some() {
+            let resolver = Arc::new(acme::CertResolver::new());
+
+            // Load any existing certs from disk
+            let active_apps = state.list_active_apps()?;
+            let domains: Vec<String> = active_apps.iter().map(|a| a.domain.clone()).collect();
+
+            for domain in &domains {
+                let paths = acme::CertPaths::for_domain(&config.data_dir, domain);
+                if paths.exists() {
+                    if let Err(e) = resolver.load_cert(domain, &paths.cert, &paths.key) {
+                        tracing::warn!(domain, err = %e, "failed to load existing cert");
+                    }
+                }
+            }
+
+            // Spawn background cert provisioning
+            let data_dir = config.data_dir.clone();
+            let email = config.tls.acme_email.clone().unwrap();
+            let staging = config.tls.staging;
+            let cs = challenge_store.clone();
+            let cr = resolver.clone();
+
+            tokio::spawn(async move {
+                if let Err(e) =
+                    acme::provision_and_load_certs(&data_dir, &domains, &email, &cs, &cr, staging)
+                        .await
+                {
+                    tracing::error!(err = %e, "ACME cert provisioning failed");
+                }
+            });
+
+            Some(resolver)
+        } else {
+            None
+        };
+
         // Start the reverse proxy
-        let _proxy_handle = proxy::start_proxy(&config, route_table.clone())?;
+        let _proxy_handle = proxy::start_proxy(
+            &config,
+            route_table.clone(),
+            challenge_store.clone(),
+            cert_resolver,
+        )?;
 
         tracing::info!("vela server ready");
 
@@ -212,8 +258,9 @@ pub fn internal_deploy(args: InternalDeployArgs) -> Result<()> {
     let release_id = deploy::generate_release_id();
     let release_dir = deploy::extract_release(&config.apps_dir(), app_name, &release_id, tarball)?;
 
-    // Ensure data directory exists
+    // Ensure data directory exists and sandbox the release
     let data_dir = deploy::ensure_data_dir(&config.apps_dir(), app_name)?;
+    sandbox::prepare_sandbox(app_name, &release_dir, &data_dir)?;
 
     // Collect env vars (manifest env + secrets)
     let mut env_vars: Vec<(String, String)> = manifest
@@ -245,7 +292,7 @@ pub fn internal_deploy(args: InternalDeployArgs) -> Result<()> {
         .build()?;
 
     rt.block_on(async {
-        let mut pm = process::ProcessManager::new();
+        let mut pm = process::ProcessManager::new(config.logs_dir());
 
         // If sequential strategy, we don't start the new one until old is stopped.
         // For blue-green, we start new alongside old.
@@ -277,6 +324,7 @@ pub fn internal_deploy(args: InternalDeployArgs) -> Result<()> {
                     eprintln!("  health check failed: {e}");
                     pm.abort_pending(app_name).await?;
                     // Clean up failed release directory and tarball
+                    let _ = sandbox::release_sandbox(&release_dir);
                     let _ = std::fs::remove_dir_all(&release_dir);
                     let _ = std::fs::remove_file(tarball);
                     anyhow::bail!("deploy failed: health check did not pass");
@@ -344,7 +392,7 @@ pub fn internal_rollback(args: InternalRollbackArgs) -> Result<()> {
         .build()?;
 
     rt.block_on(async {
-        let mut pm = process::ProcessManager::new();
+        let mut pm = process::ProcessManager::new(config.logs_dir());
 
         let port = pm
             .start(
@@ -413,5 +461,94 @@ pub fn internal_secret(args: InternalSecretArgs) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// Internal logs command — called by the client over SSH.
+pub fn internal_logs(args: InternalLogsArgs) -> Result<()> {
+    let config = ServerConfig::load(&args.config)?;
+    let log_file = if args.stderr {
+        "stderr.log"
+    } else {
+        "stdout.log"
+    };
+    let log_path = config.logs_dir().join(&args.app).join(log_file);
+
+    if !log_path.exists() {
+        anyhow::bail!("no logs found for '{}' ({})", args.app, log_path.display());
+    }
+
+    if args.follow {
+        // Use tail -f for following — simplest and most reliable
+        let status = std::process::Command::new("tail")
+            .args(["-n", &args.lines.to_string(), "-f"])
+            .arg(&log_path)
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("tail exited with {status}");
+        }
+    } else {
+        let status = std::process::Command::new("tail")
+            .args(["-n", &args.lines.to_string()])
+            .arg(&log_path)
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("tail exited with {status}");
+        }
+    }
+
+    Ok(())
+}
+
+/// Generate and install a systemd service file for `vela serve`.
+pub fn setup(args: SetupArgs) -> Result<()> {
+    let vela_bin = std::env::current_exe().context("failed to determine vela binary path")?;
+    let vela_bin = vela_bin.display();
+    let config_path = args.config.display();
+
+    let unit = format!(
+        r#"[Unit]
+Description=Vela deployment server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={vela_bin} serve --config {config_path}
+Restart=always
+RestartSec=5
+Environment=RUST_LOG=info
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/vela
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+"#
+    );
+
+    let service_path = Path::new("/etc/systemd/system/vela.service");
+
+    // Check if we can write to systemd directory
+    if service_path.parent().map_or(false, |p| p.exists()) {
+        std::fs::write(service_path, &unit).context("failed to write systemd service file")?;
+        println!("wrote {}", service_path.display());
+
+        // Reload systemd
+        let _ = std::process::Command::new("systemctl")
+            .args(["daemon-reload"])
+            .status();
+
+        println!("\nto start vela:");
+        println!("  sudo systemctl enable --now vela");
+    } else {
+        // Not on a systemd system or no permissions — just print it
+        println!("{unit}");
+        println!("# save this to /etc/systemd/system/vela.service");
+    }
+
     Ok(())
 }

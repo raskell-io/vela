@@ -120,6 +120,8 @@ pub fn cleanup_old_releases(
             release = ?entry.file_name(),
             "removing old release"
         );
+        // Restore write permissions (sandbox makes release read-only)
+        super::sandbox::release_sandbox(&entry.path())?;
         std::fs::remove_dir_all(entry.path())?;
     }
 

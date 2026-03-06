@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use thiserror::Error;
 use tokio::process::{Child, Command};
@@ -30,14 +30,16 @@ pub struct ProcessManager {
     running: HashMap<String, AppProcess>,
     port_range: std::ops::RangeInclusive<u16>,
     used_ports: std::collections::HashSet<u16>,
+    logs_dir: PathBuf,
 }
 
 impl ProcessManager {
-    pub fn new() -> Self {
+    pub fn new(logs_dir: PathBuf) -> Self {
         Self {
             running: HashMap::new(),
             port_range: 10000..=20000,
             used_ports: std::collections::HashSet::new(),
+            logs_dir,
         }
     }
 
@@ -79,6 +81,22 @@ impl ProcessManager {
             });
         }
 
+        // Set up log files
+        let app_log_dir = self.logs_dir.join(app_name);
+        std::fs::create_dir_all(&app_log_dir)?;
+        let stdout_file = std::fs::File::create(app_log_dir.join("stdout.log")).map_err(|e| {
+            ProcessError::StartFailed {
+                app: app_name.to_string(),
+                reason: format!("failed to create stdout log: {e}"),
+            }
+        })?;
+        let stderr_file = std::fs::File::create(app_log_dir.join("stderr.log")).map_err(|e| {
+            ProcessError::StartFailed {
+                app: app_name.to_string(),
+                reason: format!("failed to create stderr log: {e}"),
+            }
+        })?;
+
         let mut cmd = match app_type {
             AppType::Binary => Command::new(&entrypoint),
             AppType::Beam => {
@@ -92,8 +110,8 @@ impl ProcessManager {
             .env("VELA_PORT", port.to_string())
             .env("VELA_DATA_DIR", data_dir)
             .env("VELA_APP_NAME", app_name)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stdout(stdout_file)
+            .stderr(stderr_file);
 
         // Set user-defined env vars
         for (key, value) in env_vars {
@@ -222,7 +240,7 @@ mod tests {
 
     #[test]
     fn port_allocation() {
-        let mut pm = ProcessManager::new();
+        let mut pm = ProcessManager::new(std::path::PathBuf::from("/tmp/vela-test-logs"));
         let port1 = pm.allocate_port().unwrap();
         let port2 = pm.allocate_port().unwrap();
         assert_ne!(port1, port2);

@@ -12,25 +12,17 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  build-linux:
     name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
             artifact: vela-linux-amd64
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
             artifact: vela-linux-arm64
-            cross: true
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            artifact: vela-darwin-amd64
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            artifact: vela-darwin-arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -43,12 +35,8 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install cross
-        if: matrix.cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
       - name: Install cross-compilation tools
-        if: matrix.target == 'aarch64-unknown-linux-gnu' && !matrix.cross
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
@@ -56,12 +44,42 @@ jobs:
           echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
           echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
 
-      - name: Build (cross)
-        if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Build (native)
-        if: ${{ !matrix.cross }}
+      - name: Rename binary
+        run: cp target/${{ matrix.target }}/release/vela ${{ matrix.artifact }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  build-macos:
+    name: Build ${{ matrix.target }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            artifact: vela-darwin-amd64
+          - target: aarch64-apple-darwin
+            artifact: vela-darwin-arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Rename binary
@@ -75,7 +93,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: build
+    needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -93,7 +111,6 @@ jobs:
             chmod +x "release/$name"
             sha256sum "release/$name" >> release/checksums.txt
           done
-          # Fix checksums to not include the release/ prefix
           sed -i 's|release/||' release/checksums.txt
 
       - name: Create GitHub Release

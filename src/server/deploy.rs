@@ -1,12 +1,6 @@
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-use crate::config::{AppType, DeployStrategy};
-use crate::health::HealthCheck;
-
-use super::process::ProcessManager;
-use super::state::ServerState;
-
 #[derive(Debug, Error)]
 pub enum DeployError {
     #[error("app '{0}' not found")]

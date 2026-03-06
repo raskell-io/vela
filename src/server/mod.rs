@@ -46,7 +46,7 @@ pub fn run(args: ServeArgs) -> Result<()> {
         restore_apps(&config, &state, &process_manager, &route_table).await?;
 
         // Start the reverse proxy
-        let proxy_handle = proxy::start_proxy(&config, route_table.clone())?;
+        let _proxy_handle = proxy::start_proxy(&config, route_table.clone())?;
 
         tracing::info!("vela server ready");
 
@@ -56,9 +56,13 @@ pub fn run(args: ServeArgs) -> Result<()> {
 
         // Graceful shutdown: stop all apps
         let mut pm = process_manager.lock().await;
-        for (app_name, _port) in pm.list_active() {
-            let name = app_name.to_string();
-            let _ = pm.stop(&name).await;
+        let active_names: Vec<String> = pm
+            .list_active()
+            .into_iter()
+            .map(|(name, _)| name.to_string())
+            .collect();
+        for name in &active_names {
+            let _ = pm.stop(name).await;
         }
 
         Ok(())
@@ -220,7 +224,7 @@ pub fn internal_deploy(args: InternalDeployArgs) -> Result<()> {
 
     // Resolve ${secret:KEY} references and add secrets as env vars
     let secrets = state.get_secrets(app_name)?;
-    for (env_key, env_val) in &mut env_vars {
+    for (_env_key, env_val) in &mut env_vars {
         for (secret_key, secret_val) in &secrets {
             let placeholder = format!("${{secret:{secret_key}}}");
             if env_val.contains(&placeholder) {

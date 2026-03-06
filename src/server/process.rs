@@ -1,10 +1,10 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 use thiserror::Error;
 use tokio::process::{Child, Command};
 
-use crate::config::{AppType, DeployStrategy};
+use crate::config::AppType;
 
 #[derive(Debug, Error)]
 pub enum ProcessError {

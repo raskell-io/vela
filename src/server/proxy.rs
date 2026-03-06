@@ -142,7 +142,7 @@ async fn run_https_proxy(
     let certs = load_certs(cert_path)?;
     let key = load_private_key(key_path)?;
 
-    let mut tls_config = tokio_rustls::rustls::ServerConfig::builder()
+    let tls_config = tokio_rustls::rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| anyhow::anyhow!("TLS config error: {e}"))?;
@@ -230,8 +230,11 @@ async fn handle_request(
 
     let mut upstream_req = client.request(method, &uri);
 
-    // Forward headers (except Host, which we set to the upstream)
-    for (key, value) in req.headers() {
+    // Extract headers and body from the incoming request
+    let (parts, body) = req.into_parts();
+
+    // Forward headers (except Host)
+    for (key, value) in &parts.headers {
         if key != hyper::header::HOST {
             if let Ok(v) = value.to_str() {
                 upstream_req = upstream_req.header(key.as_str(), v);
@@ -240,7 +243,7 @@ async fn handle_request(
     }
 
     // Forward body
-    let body_bytes = match http_body_util::BodyExt::collect(req.into_body()).await {
+    let body_bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(collected) => collected.to_bytes(),
         Err(_) => hyper::body::Bytes::new(),
     };

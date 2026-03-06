@@ -92,13 +92,13 @@ impl AcmeClient {
     pub async fn provision_cert(&self, domain: &str, contact_email: &str) -> Result<CertPaths> {
         use instant_acme::{
             Account, AuthorizationStatus, ChallengeType, Identifier, NewAccount, NewOrder,
-            OrderStatus,
+            OrderStatus, RetryPolicy,
         };
 
         let directory_url = if self.use_staging {
-            "https://acme-staging-v02.api.letsencrypt.org/directory"
+            "https://acme-staging-v02.api.letsencrypt.org/directory".to_string()
         } else {
-            "https://acme-v02.api.letsencrypt.org/directory"
+            "https://acme-v02.api.letsencrypt.org/directory".to_string()
         };
 
         tracing::info!(
@@ -109,17 +109,19 @@ impl AcmeClient {
 
         // Create or load ACME account
         let contact = format!("mailto:{contact_email}");
-        let (account, _credentials) = Account::create(
-            &NewAccount {
-                contact: &[&contact],
-                terms_of_service_agreed: true,
-                only_return_existing: false,
-            },
-            directory_url,
-            None,
-        )
-        .await
-        .context("failed to create ACME account")?;
+        let (account, _credentials) = Account::builder()
+            .map_err(|e| anyhow::anyhow!("failed to create ACME client: {e}"))?
+            .create(
+                &NewAccount {
+                    contact: &[&contact],
+                    terms_of_service_agreed: true,
+                    only_return_existing: false,
+                },
+                directory_url,
+                None,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to create ACME account: {e}"))?;
 
         // Create order for the domain
         let identifier = Identifier::Dns(domain.to_string());
@@ -128,80 +130,67 @@ impl AcmeClient {
                 identifiers: &[identifier],
             })
             .await
-            .context("failed to create ACME order")?;
+            .map_err(|e| anyhow::anyhow!("failed to create ACME order: {e}"))?;
 
         let state = order.state();
         tracing::debug!(domain, status = ?state.status, "ACME order created");
 
-        // Get authorizations
-        let authorizations = order
-            .authorizations()
-            .await
-            .context("failed to get ACME authorizations")?;
+        // Process authorizations via the stream-like API
+        let mut challenge_tokens: Vec<String> = Vec::new();
+        let mut authorizations = order.authorizations();
+        while let Some(result) = authorizations.next().await {
+            let mut auth = result
+                .map_err(|e| anyhow::anyhow!("failed to get ACME authorization: {e}"))?;
 
-        for auth in &authorizations {
             match auth.status {
-                AuthorizationStatus::Pending => {}
                 AuthorizationStatus::Valid => continue,
-                _ => anyhow::bail!("unexpected authorization status: {:?}", auth.status),
+                AuthorizationStatus::Pending => {}
+                status => anyhow::bail!("unexpected authorization status: {status:?}"),
             }
 
-            // Find the HTTP-01 challenge
-            let challenge = auth
-                .challenges
-                .iter()
-                .find(|c| c.r#type == ChallengeType::Http01)
+            // Get the HTTP-01 challenge handle
+            let mut challenge = auth
+                .challenge(ChallengeType::Http01)
                 .context("no HTTP-01 challenge found")?;
 
             // Set up the challenge response
-            let key_auth = order.key_authorization(challenge);
-            self.challenge_store
-                .set(&challenge.token, key_auth.as_str());
+            let key_auth = challenge.key_authorization();
+            let token = challenge.token.clone();
+            self.challenge_store.set(&token, key_auth.as_str());
+            challenge_tokens.push(token.clone());
 
-            tracing::info!(domain, token = %challenge.token, "serving ACME challenge");
+            tracing::info!(domain, token = %token, "serving ACME challenge");
 
             // Tell the ACME server we're ready
-            order
-                .set_challenge_ready(&challenge.url)
+            challenge
+                .set_ready()
                 .await
-                .context("failed to set challenge ready")?;
+                .map_err(|e| anyhow::anyhow!("failed to set challenge ready: {e}"))?;
         }
 
         // Poll until the order is ready
-        let mut tries = 0;
-        let state = loop {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            let state = order.refresh().await.context("failed to refresh order")?;
-            tries += 1;
+        let retries = RetryPolicy::new()
+            .initial_delay(std::time::Duration::from_secs(2))
+            .timeout(std::time::Duration::from_secs(30));
 
-            match state.status {
-                OrderStatus::Ready | OrderStatus::Valid => break state,
-                OrderStatus::Pending if tries < 15 => continue,
-                OrderStatus::Processing if tries < 15 => continue,
-                status => {
-                    // Clean up challenge tokens
-                    for auth in &authorizations {
-                        for c in &auth.challenges {
-                            if c.r#type == ChallengeType::Http01 {
-                                self.challenge_store.remove(&c.token);
-                            }
-                        }
-                    }
-                    anyhow::bail!("ACME order failed with status: {status:?}");
-                }
+        let cleanup_tokens = || {
+            for token in &challenge_tokens {
+                self.challenge_store.remove(token);
             }
         };
 
-        tracing::info!(domain, status = ?state.status, "ACME order ready");
+        let status = order
+            .poll_ready(&retries)
+            .await
+            .map_err(|e| {
+                cleanup_tokens();
+                anyhow::anyhow!("ACME order failed: {e}")
+            })?;
+
+        tracing::info!(domain, ?status, "ACME order ready");
 
         // Clean up challenge tokens
-        for auth in &authorizations {
-            for c in &auth.challenges {
-                if c.r#type == ChallengeType::Http01 {
-                    self.challenge_store.remove(&c.token);
-                }
-            }
-        }
+        cleanup_tokens();
 
         // Generate a CSR and finalize the order
         let mut params = rcgen::CertificateParams::new(vec![domain.to_string()])
@@ -213,27 +202,15 @@ impl AcmeClient {
             .context("failed to serialize CSR")?;
 
         order
-            .finalize(csr.der())
+            .finalize_csr(csr.der())
             .await
-            .context("failed to finalize ACME order")?;
+            .map_err(|e| anyhow::anyhow!("failed to finalize ACME order: {e}"))?;
 
         // Wait for certificate
-        let cert_chain_pem = loop {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            match order
-                .certificate()
-                .await
-                .context("failed to get certificate")?
-            {
-                Some(cert) => break cert,
-                None => {
-                    tries += 1;
-                    if tries > 20 {
-                        anyhow::bail!("timed out waiting for certificate");
-                    }
-                }
-            }
-        };
+        let cert_chain_pem = order
+            .poll_certificate(&retries)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to get certificate: {e}"))?;
 
         // Save cert and key to disk
         let paths = CertPaths::for_domain(&self.data_dir, domain);

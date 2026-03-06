@@ -266,7 +266,7 @@ async fn deploy_sequential(
     data_dir: &Path,
     env_vars: &[(String, String)],
     health_path: Option<&str>,
-    drain_seconds: u32,
+    _drain_seconds: u32,
     domain: &str,
 ) -> DaemonResponse {
     // Stop old instance first (removes route so no traffic during gap)

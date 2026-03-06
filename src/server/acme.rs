@@ -92,7 +92,7 @@ impl AcmeClient {
     pub async fn provision_cert(&self, domain: &str, contact_email: &str) -> Result<CertPaths> {
         use instant_acme::{
             Account, AuthorizationStatus, ChallengeType, Identifier, NewAccount, NewOrder,
-            OrderStatus, RetryPolicy,
+            RetryPolicy,
         };
 
         let directory_url = if self.use_staging {
@@ -126,9 +126,7 @@ impl AcmeClient {
         // Create order for the domain
         let identifier = Identifier::Dns(domain.to_string());
         let mut order = account
-            .new_order(&NewOrder {
-                identifiers: &[identifier],
-            })
+            .new_order(&NewOrder::new(&[identifier]))
             .await
             .map_err(|e| anyhow::anyhow!("failed to create ACME order: {e}"))?;
 
@@ -241,6 +239,21 @@ impl AcmeClient {
 /// Implements rustls `ResolvesServerCert` for SNI-based cert selection.
 pub struct CertResolver {
     certs: Arc<RwLock<HashMap<String, Arc<rustls::sign::CertifiedKey>>>>,
+}
+
+impl std::fmt::Debug for CertResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let domains: Vec<String> = self
+            .certs
+            .read()
+            .expect("cert resolver lock poisoned")
+            .keys()
+            .cloned()
+            .collect();
+        f.debug_struct("CertResolver")
+            .field("domains", &domains)
+            .finish()
+    }
 }
 
 impl CertResolver {

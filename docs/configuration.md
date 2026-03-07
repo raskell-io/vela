@@ -18,6 +18,8 @@ binary = "my-app"         # Entrypoint name within the release directory
 health = "/health"        # Health check path (GET, expects 200)
 drain = 5                 # Seconds to drain old connections (default: 5)
 strategy = "blue-green"   # "blue-green" or "sequential" (default: "blue-green")
+pre_start = "bin/migrate" # Command to run before app starts (optional)
+post_deploy = "bin/notify"# Command to run after traffic swap (optional)
 
 [env]
 DATABASE_PATH = "${data_dir}/my-app.db"
@@ -39,6 +41,18 @@ cpu_weight = 100          # CPU weight, relative (future)
 **`blue-green`** (default) — Starts the new instance alongside the old one. After the health check passes, traffic swaps to the new instance and the old one drains. True zero downtime. Best for stateless apps.
 
 **`sequential`** — Stops the old instance, then starts the new one. Sub-second blip. Use this for apps with SQLite databases to avoid write contention during the brief overlap window.
+
+### Deploy Hooks
+
+**`pre_start`** — Runs inside the release directory after extraction, before the app starts. If the command exits non-zero, the deploy aborts and the old instance stays running. Use for database migrations.
+
+**`post_deploy`** — Runs after the health check passes and traffic switches to the new instance. Failures are logged but do not roll back the deploy. Use for cache warming, notifications, etc.
+
+Both hooks run with the same environment variables as the app (secrets, manifest env, `PORT`, `VELA_DATA_DIR`).
+
+### Manifest Env Persistence
+
+The `[env]` section from your `Vela.toml` is persisted in `app.toml` on the server. When the Vela daemon restarts, it restores apps with their full environment (manifest env + secrets + Vela-injected vars like `PORT`).
 
 ### Environment Variable Substitution
 

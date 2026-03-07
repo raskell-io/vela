@@ -63,6 +63,14 @@ pub enum Command {
 
     /// Generate a systemd service file for vela
     Setup(SetupArgs),
+
+    /// Run a backup now
+    Backup(BackupArgs),
+
+    /// [internal] Run backup on the server
+    #[command(hide = true)]
+    #[clap(name = "_backup")]
+    InternalBackup(InternalBackupArgs),
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +292,24 @@ pub struct InternalLogsArgs {
 
 #[derive(clap::Args)]
 pub struct SetupArgs {
+    /// Path to server config file
+    #[arg(short, long, default_value = "/etc/vela/server.toml")]
+    pub config: PathBuf,
+}
+
+#[derive(clap::Args)]
+pub struct BackupArgs {
+    /// Server address (user@host)
+    #[arg(short, long)]
+    pub server: Option<String>,
+
+    /// Path to Vela.toml (to infer server)
+    #[arg(short, long, default_value = "Vela.toml")]
+    pub manifest: PathBuf,
+}
+
+#[derive(clap::Args)]
+pub struct InternalBackupArgs {
     /// Path to server config file
     #[arg(short, long, default_value = "/etc/vela/server.toml")]
     pub config: PathBuf,

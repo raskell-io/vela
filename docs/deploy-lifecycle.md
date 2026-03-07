@@ -20,20 +20,21 @@ vela deploy ./target/release/my-app
 │     │
 │     ├─ 4a. Generate release ID (timestamp: 20260305-143022)
 │     ├─ 4b. Extract tarball → /var/vela/apps/<app>/releases/<id>/
-│     ├─ 4c. Register app in database (upsert)
-│     ├─ 4d. Start new instance on random port
-│     ├─ 4e. Run health check (retry up to 30 times, 1s apart)
+│     ├─ 4c. Register app config (upsert app.toml, persist env)
+│     ├─ 4d. Run pre_start hook (if configured; abort on failure)
+│     ├─ 4e. Start new instance on random port
+│     ├─ 4f. Run health check (retry up to 30 times, 1s apart)
 │     │
 │     ├─ On health check success:
-│     │   ├─ 4f. Update proxy routing (domain → new port)
-│     │   ├─ 4g. Update current symlink → new release
-│     │   ├─ 4h. Drain old instance (wait drain_seconds)
-│     │   ├─ 4i. Stop old instance
-│     │   └─ 4j. Clean up old releases (keep last 5)
+│     │   ├─ 4g. Update proxy routing (domain → new port)
+│     │   ├─ 4h. Update current symlink → new release
+│     │   ├─ 4i. Drain old instance (wait drain_seconds)
+│     │   ├─ 4j. Stop old instance
+│     │   ├─ 4k. Run post_deploy hook (if configured; log-only on failure)
+│     │   └─ 4l. Clean up old releases (keep last 5)
 │     │
 │     └─ On health check failure:
 │         ├─ Kill new instance
-│         ├─ Mark release as failed
 │         └─ Old instance keeps running (nothing changed)
 │
 └─ 5. Done
@@ -108,6 +109,34 @@ If your app needs more startup time, this will be configurable in a future versi
 - Don't return 200 until your app is actually ready (DB migrations done, caches warmed)
 - For Phoenix apps, use `Phoenix.Endpoint.HealthCheck` or a simple plug
 - For Rust apps, a basic `/health` route returning `200 OK` is enough
+
+## Deploy Hooks
+
+Two optional hooks run during the deploy sequence:
+
+### `pre_start`
+
+Runs after extraction (step 4d), before the new instance starts. Use for database migrations, asset compilation, or validation.
+
+```toml
+[deploy]
+pre_start = "bin/my_app eval 'MyApp.Release.migrate()'"
+```
+
+If the hook exits non-zero, the deploy aborts immediately. The old instance stays running.
+
+### `post_deploy`
+
+Runs after traffic switches to the new instance (step 4k). Use for cache warming, notifications, or cleanup.
+
+```toml
+[deploy]
+post_deploy = "curl -X POST https://hooks.slack.com/..."
+```
+
+If the hook fails, the failure is logged but the deploy is not rolled back (traffic already switched).
+
+Both hooks run with the same environment variables as the app (secrets, manifest env, `PORT`, `VELA_DATA_DIR`) and use the release directory as the working directory.
 
 ## Rollback
 

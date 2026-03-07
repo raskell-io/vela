@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -9,6 +10,7 @@ use tokio::sync::Mutex;
 
 use super::process::ProcessManager;
 use super::proxy::RouteTable;
+use super::service::ServiceManager;
 use crate::config::{AppType, DeployStrategy};
 use crate::health::HealthCheck;
 
@@ -42,6 +44,8 @@ pub enum DaemonRequest {
         health_path: Option<String>,
         drain_seconds: u32,
         domain: String,
+        #[serde(default)]
+        services: HashMap<String, toml::Value>,
     },
     #[serde(rename = "stop")]
     Stop { app: String, domain: String },
@@ -59,6 +63,7 @@ pub async fn start_ipc_server(
     sock_path: &Path,
     process_manager: Arc<Mutex<ProcessManager>>,
     route_table: RouteTable,
+    service_manager: Arc<Mutex<ServiceManager>>,
 ) -> Result<()> {
     // Remove stale socket from a previous run
     let _ = std::fs::remove_file(sock_path);
@@ -83,9 +88,10 @@ pub async fn start_ipc_server(
         let (stream, _) = listener.accept().await?;
         let pm = process_manager.clone();
         let rt = route_table.clone();
+        let sm = service_manager.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, pm, rt).await {
+            if let Err(e) = handle_connection(stream, pm, rt, sm).await {
                 tracing::error!(err = %e, "IPC connection error");
             }
         });
@@ -96,6 +102,7 @@ async fn handle_connection(
     stream: UnixStream,
     process_manager: Arc<Mutex<ProcessManager>>,
     route_table: RouteTable,
+    service_manager: Arc<Mutex<ServiceManager>>,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -113,26 +120,71 @@ async fn handle_connection(
             app_type,
             strategy,
             data_dir,
-            env_vars,
+            mut env_vars,
             health_path,
             drain_seconds,
             domain,
+            services,
         } => {
-            handle_deploy(
-                &process_manager,
-                &route_table,
-                &app,
-                &release_dir,
-                &binary_name,
-                &app_type,
-                &strategy,
-                &data_dir,
-                &env_vars,
-                health_path.as_deref(),
-                drain_seconds,
-                &domain,
-            )
-            .await
+            // Provision services and inject their env vars
+            if !services.is_empty() {
+                let mut sm = service_manager.lock().await;
+                let mut svc_failed = None;
+                for (svc_type, svc_config) in &services {
+                    match sm.ensure_service(svc_type, svc_config).await {
+                        Ok(svc_vars) => {
+                            for (k, v) in svc_vars {
+                                if !env_vars.iter().any(|(ek, _)| ek == &k) {
+                                    env_vars.push((k, v));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            svc_failed = Some(DaemonResponse {
+                                success: false,
+                                message: format!("failed to provision service {svc_type}: {e}"),
+                                port: None,
+                            });
+                            break;
+                        }
+                    }
+                }
+                if let Some(resp) = svc_failed {
+                    resp
+                } else {
+                    handle_deploy(
+                        &process_manager,
+                        &route_table,
+                        &app,
+                        &release_dir,
+                        &binary_name,
+                        &app_type,
+                        &strategy,
+                        &data_dir,
+                        &env_vars,
+                        health_path.as_deref(),
+                        drain_seconds,
+                        &domain,
+                    )
+                    .await
+                }
+            } else {
+                handle_deploy(
+                    &process_manager,
+                    &route_table,
+                    &app,
+                    &release_dir,
+                    &binary_name,
+                    &app_type,
+                    &strategy,
+                    &data_dir,
+                    &env_vars,
+                    health_path.as_deref(),
+                    drain_seconds,
+                    &domain,
+                )
+                .await
+            }
         }
         DaemonRequest::Stop { app, domain } => {
             handle_stop(&process_manager, &route_table, &app, &domain).await
@@ -430,6 +482,7 @@ mod tests {
             health_path: Some("/health".into()),
             drain_seconds: 5,
             domain: "myapp.com".into(),
+            services: HashMap::new(),
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: DaemonRequest = serde_json::from_str(&json).unwrap();
@@ -437,6 +490,42 @@ mod tests {
             DaemonRequest::Deploy { app, domain, .. } => {
                 assert_eq!(app, "myapp");
                 assert_eq!(domain, "myapp.com");
+            }
+            _ => panic!("expected Deploy"),
+        }
+    }
+
+    #[test]
+    fn serialize_deploy_with_services() {
+        let mut services = HashMap::new();
+        services.insert(
+            "postgres".into(),
+            toml::Value::try_from(toml::toml! {
+                version = "17"
+                databases = ["mydb"]
+            })
+            .unwrap(),
+        );
+
+        let req = DaemonRequest::Deploy {
+            app: "myapp".into(),
+            release_dir: PathBuf::from("/var/vela/apps/myapp/releases/001"),
+            binary_name: "myapp".into(),
+            app_type: "binary".into(),
+            strategy: "blue-green".into(),
+            data_dir: PathBuf::from("/var/vela/apps/myapp/data"),
+            env_vars: vec![],
+            health_path: None,
+            drain_seconds: 5,
+            domain: "myapp.com".into(),
+            services,
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: DaemonRequest = serde_json::from_str(&json).unwrap();
+        match parsed {
+            DaemonRequest::Deploy { services, .. } => {
+                assert!(services.contains_key("postgres"));
             }
             _ => panic!("expected Deploy"),
         }

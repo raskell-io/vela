@@ -12,6 +12,10 @@ pub struct Manifest {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub resources: ResourceConfig,
+    #[serde(default)]
+    pub services: HashMap<String, toml::Value>,
+    #[serde(default)]
+    pub build: Option<BuildConfig>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -131,6 +135,21 @@ impl DeployStrategy {
     }
 }
 
+/// Build config: remote builds on the server.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BuildConfig {
+    /// Build on the server instead of locally.
+    #[serde(default)]
+    pub remote: bool,
+
+    /// Build command to run (e.g. "mix release", "cargo build --release").
+    pub command: String,
+
+    /// Extra environment variables for the build.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
 /// Server-side config (/etc/vela/server.toml)
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ServerConfig {
@@ -142,6 +161,52 @@ pub struct ServerConfig {
 
     #[serde(default)]
     pub tls: TlsConfig,
+
+    #[serde(default)]
+    pub backup: Option<BackupConfig>,
+}
+
+/// Backup configuration for scheduled backups.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BackupConfig {
+    /// Schedule: "daily", "hourly", or interval in hours (e.g. "12h").
+    #[serde(default = "default_backup_schedule")]
+    pub schedule: String,
+
+    /// Number of backups to retain.
+    #[serde(default = "default_backup_retain")]
+    pub retain: u32,
+
+    /// Destination path (local directory or s3://bucket/prefix).
+    pub destination: String,
+
+    #[serde(default)]
+    pub include: BackupInclude,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BackupInclude {
+    /// Back up app data directories (SQLite databases, etc.)
+    #[serde(default = "default_true")]
+    pub app_data: bool,
+
+    /// Back up secrets.env files.
+    #[serde(default = "default_true")]
+    pub secrets: bool,
+
+    /// Back up Postgres databases via pg_dump.
+    #[serde(default = "default_true")]
+    pub postgres: bool,
+}
+
+impl Default for BackupInclude {
+    fn default() -> Self {
+        Self {
+            app_data: true,
+            secrets: true,
+            postgres: true,
+        }
+    }
 }
 
 impl Default for ServerConfig {
@@ -150,6 +215,7 @@ impl Default for ServerConfig {
             data_dir: default_data_dir(),
             proxy: ProxyConfig::default(),
             tls: TlsConfig::default(),
+            backup: None,
         }
     }
 }
@@ -235,6 +301,14 @@ impl ServerConfig {
     pub fn socket_path(&self) -> PathBuf {
         self.data_dir.join("vela.sock")
     }
+
+    pub fn services_dir(&self) -> PathBuf {
+        self.data_dir.join("services")
+    }
+
+    pub fn backups_dir(&self) -> PathBuf {
+        self.data_dir.join("backups")
+    }
 }
 
 fn default_app_type() -> AppType {
@@ -255,6 +329,18 @@ fn default_http_port() -> u16 {
 
 fn default_https_port() -> u16 {
     443
+}
+
+fn default_backup_schedule() -> String {
+    "daily".to_string()
+}
+
+fn default_backup_retain() -> u32 {
+    7
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -374,6 +460,72 @@ key = "/etc/vela/tls/origin-key.pem"
         assert_eq!(AppType::from_str_loose("beam"), AppType::Beam);
         assert_eq!(AppType::from_str_loose("binary"), AppType::Binary);
         assert_eq!(AppType::from_str_loose("unknown"), AppType::Binary);
+    }
+
+    #[test]
+    fn parse_manifest_with_services() {
+        let toml_str = r#"
+[app]
+name = "coordinator"
+domain = "app.archipelag.io"
+
+[deploy]
+server = "root@hetzner"
+type = "beam"
+
+[services.postgres]
+version = "17"
+databases = ["coordinator_prod"]
+
+[services.nats]
+version = "2.10"
+jetstream = true
+"#;
+        let manifest: Manifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(manifest.services.len(), 2);
+        assert!(manifest.services.contains_key("postgres"));
+        assert!(manifest.services.contains_key("nats"));
+    }
+
+    #[test]
+    fn parse_manifest_with_build() {
+        let toml_str = r#"
+[app]
+name = "myapp"
+domain = "myapp.com"
+
+[build]
+remote = true
+command = "mix release"
+
+[build.env]
+MIX_ENV = "prod"
+"#;
+        let manifest: Manifest = toml::from_str(toml_str).unwrap();
+        let build = manifest.build.unwrap();
+        assert!(build.remote);
+        assert_eq!(build.command, "mix release");
+        assert_eq!(build.env.get("MIX_ENV").unwrap(), "prod");
+    }
+
+    #[test]
+    fn parse_server_config_with_backup() {
+        let toml_str = r#"
+[backup]
+schedule = "daily"
+retain = 7
+destination = "s3://backups/vela"
+
+[backup.include]
+app_data = true
+secrets = true
+postgres = true
+"#;
+        let config: ServerConfig = toml::from_str(toml_str).unwrap();
+        let backup = config.backup.unwrap();
+        assert_eq!(backup.schedule, "daily");
+        assert_eq!(backup.retain, 7);
+        assert!(backup.include.postgres);
     }
 
     #[test]

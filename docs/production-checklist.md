@@ -172,6 +172,8 @@ sudo systemctl restart vela
 
 The next request to your domain will trigger real certificate provisioning. This takes 10-30 seconds.
 
+Once provisioned, Vela automatically renews certificates when they're within 30 days of expiry. No manual intervention needed.
+
 ## Post-Deploy Operations
 
 ```bash

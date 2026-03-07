@@ -1,9 +1,11 @@
 mod acme;
+pub(crate) mod backup;
 mod deploy;
 mod ipc;
 mod process;
 mod proxy;
 mod sandbox;
+pub(crate) mod service;
 mod state;
 
 use std::io::Read as _;
@@ -14,8 +16,8 @@ use anyhow::{Context, Result};
 use tokio::sync::Mutex;
 
 use crate::cli::{
-    AppsArgs, InternalDeployArgs, InternalLogsArgs, InternalRollbackArgs, InternalSecretAction,
-    InternalSecretArgs, ServeArgs, SetupArgs,
+    AppsArgs, InternalBackupArgs, InternalDeployArgs, InternalLogsArgs, InternalRollbackArgs,
+    InternalSecretAction, InternalSecretArgs, ServeArgs, SetupArgs,
 };
 use crate::config::{AppType, Manifest, ServerConfig};
 
@@ -37,6 +39,7 @@ pub fn run(args: ServeArgs) -> Result<()> {
     std::fs::create_dir_all(config.apps_dir())?;
     std::fs::create_dir_all(config.secrets_dir())?;
     std::fs::create_dir_all(config.logs_dir())?;
+    std::fs::create_dir_all(config.services_dir())?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -47,6 +50,15 @@ pub fn run(args: ServeArgs) -> Result<()> {
         let route_table = proxy::RouteTable::new();
         let challenge_store = acme::ChallengeStore::new();
         let process_manager = Arc::new(Mutex::new(process::ProcessManager::new(config.logs_dir())));
+        let service_manager = Arc::new(Mutex::new(service::ServiceManager::new(&config.data_dir)));
+
+        // Restore services before apps (services must be running first)
+        {
+            let mut sm = service_manager.lock().await;
+            if let Err(e) = sm.restore().await {
+                tracing::error!(err = %e, "failed to restore services");
+            }
+        }
 
         // Restore previously active apps
         restore_apps(&config, &state, &process_manager, &route_table).await?;
@@ -117,9 +129,10 @@ pub fn run(args: ServeArgs) -> Result<()> {
         let sock_path = config.socket_path();
         let ipc_pm = process_manager.clone();
         let ipc_rt = route_table.clone();
+        let ipc_sm = service_manager.clone();
         let ipc_sock = sock_path.clone();
         tokio::spawn(async move {
-            if let Err(e) = ipc::start_ipc_server(&ipc_sock, ipc_pm, ipc_rt).await {
+            if let Err(e) = ipc::start_ipc_server(&ipc_sock, ipc_pm, ipc_rt, ipc_sm).await {
                 tracing::error!(err = %e, "IPC server exited with error");
             }
         });
@@ -127,14 +140,16 @@ pub fn run(args: ServeArgs) -> Result<()> {
         // Spawn process supervision loop (check every 10s, restart crashed processes)
         let supervision_pm = process_manager.clone();
         let supervision_rt = route_table.clone();
+        let supervision_sm = service_manager.clone();
         let supervision_state = state::ServerState::open(&config)?;
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
             loop {
                 interval.tick().await;
+
+                // Supervise app processes
                 let mut pm = supervision_pm.lock().await;
                 let restarted = pm.check_and_restart().await;
-                // Update route table for restarted apps
                 for app_name in &restarted {
                     if let Some(port) = pm.active_port(app_name)
                         && let Ok(Some(app_config)) = supervision_state.get_app(app_name)
@@ -142,8 +157,58 @@ pub fn run(args: ServeArgs) -> Result<()> {
                         supervision_rt.set(&app_config.domain, port);
                     }
                 }
+                drop(pm);
+
+                // Supervise service processes (NATS)
+                let mut sm = supervision_sm.lock().await;
+                sm.check_and_restart().await;
             }
         });
+
+        // Spawn backup scheduler if configured
+        if let Some(ref backup_config) = config.backup {
+            let interval_secs = backup::schedule_to_interval_secs(&backup_config.schedule);
+            let backup_cfg = backup_config.clone();
+            let backup_apps_dir = config.apps_dir();
+            let backup_services_dir = config.services_dir();
+            let backup_data_dir = config.data_dir.clone();
+
+            tokio::spawn(async move {
+                let mut interval =
+                    tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+                interval.tick().await; // skip first immediate tick
+                loop {
+                    interval.tick().await;
+                    let state = match state::ServerState::open(&crate::config::ServerConfig {
+                        data_dir: backup_data_dir.clone(),
+                        ..Default::default()
+                    }) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!(err = %e, "backup: failed to open state");
+                            continue;
+                        }
+                    };
+
+                    if let Err(e) = backup::run_backup(
+                        &backup_cfg,
+                        &backup_apps_dir,
+                        &backup_services_dir,
+                        &state,
+                    )
+                    .await
+                    {
+                        tracing::error!(err = %e, "scheduled backup failed");
+                    }
+                }
+            });
+
+            tracing::info!(
+                schedule = %backup_config.schedule,
+                destination = %backup_config.destination,
+                "backup scheduler started"
+            );
+        }
 
         tracing::info!("vela server ready");
 
@@ -151,7 +216,7 @@ pub fn run(args: ServeArgs) -> Result<()> {
         tokio::signal::ctrl_c().await?;
         tracing::info!("shutting down");
 
-        // Graceful shutdown: stop all apps
+        // Graceful shutdown: stop all apps first, then services
         let mut pm = process_manager.lock().await;
         let active_names: Vec<String> = pm
             .list_active()
@@ -161,6 +226,12 @@ pub fn run(args: ServeArgs) -> Result<()> {
         for name in &active_names {
             let _ = pm.stop(name).await;
         }
+        drop(pm);
+
+        // Stop services after apps
+        let mut sm = service_manager.lock().await;
+        sm.stop_all().await;
+        drop(sm);
 
         // Clean up socket file
         let _ = std::fs::remove_file(&sock_path);
@@ -400,6 +471,7 @@ pub fn internal_deploy(args: InternalDeployArgs) -> Result<()> {
                 health_path: health_path.map(String::from),
                 drain_seconds: drain,
                 domain: manifest.app.domain.clone(),
+                services: manifest.services.clone(),
             },
         )
         .await?;
@@ -595,6 +667,29 @@ pub fn internal_logs(args: InternalLogsArgs) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Internal backup command — run a backup immediately.
+pub fn internal_backup(args: InternalBackupArgs) -> Result<()> {
+    let config = ServerConfig::load(&args.config)?;
+
+    let backup_config = config
+        .backup
+        .as_ref()
+        .context("no [backup] section in server.toml")?;
+
+    let state = state::ServerState::open(&config)?;
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+
+    rt.block_on(async {
+        backup::run_backup(backup_config, &config.apps_dir(), &config.services_dir(), &state).await
+    })?;
+
+    println!("backup completed");
     Ok(())
 }
 

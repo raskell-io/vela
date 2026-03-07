@@ -126,16 +126,14 @@ The `data/` directory persists across deploys. Your database is safe.
 
 ### Migrations
 
-Run migrations on startup in your `application.ex`:
+Use Vela's `pre_start` deploy hook to run migrations before the new instance starts. If the migration fails, the deploy aborts and the old instance stays running.
 
-```elixir
-def start(_type, _args) do
-  MyApp.Release.migrate()
-  # ... rest of supervision tree
-end
+```toml
+[deploy]
+pre_start = "bin/my_app eval 'MyApp.Release.migrate()'"
 ```
 
-Or in the release module:
+Define the release module:
 
 ```elixir
 defmodule MyApp.Release do
@@ -146,6 +144,8 @@ defmodule MyApp.Release do
   end
 end
 ```
+
+The hook runs with the same environment as your app (`DATABASE_PATH`, secrets, etc.), so Ecto connects to the right database.
 
 ## Tips
 

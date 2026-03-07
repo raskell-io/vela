@@ -90,5 +90,16 @@ fn main() -> Result<()> {
         cli::Command::Setup(_) => {
             anyhow::bail!("vela setup is only supported on Linux")
         }
+
+        // Backup commands
+        cli::Command::Backup(args) => client::backup(args),
+
+        #[cfg(target_os = "linux")]
+        cli::Command::InternalBackup(args) => server::internal_backup(args),
+
+        #[cfg(not(target_os = "linux"))]
+        cli::Command::InternalBackup(_) => {
+            anyhow::bail!("_backup is a server-side command (Linux only)")
+        }
     }
 }

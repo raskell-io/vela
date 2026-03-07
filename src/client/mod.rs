@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 
 use crate::cli::{
-    DeployArgs, InitArgs, LogsArgs, RollbackArgs, SecretAction, SecretArgs, StatusArgs,
+    BackupArgs, DeployArgs, InitArgs, LogsArgs, RollbackArgs, SecretAction, SecretArgs, StatusArgs,
 };
 use crate::config::Manifest;
 
@@ -56,12 +56,19 @@ pub fn deploy(args: DeployArgs) -> Result<()> {
         .or(manifest.deploy.server.clone())
         .context("no server specified (use --server or set deploy.server in Vela.toml)")?;
 
+    let app_name = &manifest.app.name;
+
+    // Check for remote build mode
+    if let Some(ref build) = manifest.build
+        && build.remote
+    {
+        return deploy_remote_build(&args.manifest, &manifest, &server, app_name, build);
+    }
+
     let artifact = &args.artifact;
     if !artifact.exists() {
         anyhow::bail!("artifact not found: {}", artifact.display());
     }
-
-    let app_name = &manifest.app.name;
 
     println!("deploying {app_name} to {server}");
 
@@ -81,6 +88,34 @@ pub fn deploy(args: DeployArgs) -> Result<()> {
 
     // Cleanup local tarball
     let _ = std::fs::remove_file(&tarball);
+
+    Ok(())
+}
+
+/// Deploy using remote build: upload source, build on server, then deploy.
+fn deploy_remote_build(
+    manifest_path: &Path,
+    _manifest: &Manifest,
+    server: &str,
+    app_name: &str,
+    build: &crate::config::BuildConfig,
+) -> Result<()> {
+    println!("deploying {app_name} to {server} (remote build)");
+
+    // 1. Upload source via git archive
+    println!("  uploading source...");
+    ssh::upload_source(server, app_name)?;
+
+    // 2. Build on the server
+    println!("  building on server...");
+    ssh::remote_build(server, app_name, &build.command, &build.env)?;
+
+    // 3. Activate the deploy (the build output is already on the server)
+    println!("  activating...");
+    let manifest_toml = std::fs::read_to_string(manifest_path)?;
+    ssh::activate_remote_build(server, app_name, &manifest_toml)?;
+
+    println!("deployed {app_name} to {server}");
 
     Ok(())
 }
@@ -143,6 +178,13 @@ pub fn secret(args: SecretArgs) -> Result<()> {
             ssh::run_remote(&server, &["vela", "_secret", "remove", &app, &key])?;
         }
     }
+    Ok(())
+}
+
+pub fn backup(args: BackupArgs) -> Result<()> {
+    let server = resolve_server(args.server, &args.manifest)?;
+    println!("running backup on {server}");
+    ssh::run_remote(&server, &["vela", "_backup"])?;
     Ok(())
 }
 

@@ -44,7 +44,7 @@ Vela uploads your binary (or BEAM release), starts it on a fresh port, runs a he
 ```
 
 - **One binary** — same `vela` runs on server and laptop
-- **Embedded proxy** — hyper-based reverse proxy with auto-TLS via Let's Encrypt
+- **Embedded proxy** — hyper-based reverse proxy with auto-TLS via Let's Encrypt (with auto-renewal)
 - **SSH is the control plane** — no tokens, no API keys, no custom auth
 - **SQLite-aware** — persistent data directories survive deploys; sequential strategy avoids write contention
 - **Rust and Elixir** — deploy compiled binaries or BEAM releases
@@ -121,6 +121,8 @@ type = "binary"              # or "beam" for Elixir
 binary = "my-app"
 health = "/health"
 strategy = "blue-green"      # or "sequential" for SQLite apps
+pre_start = "bin/migrate"    # runs before app starts; failure aborts deploy
+post_deploy = "bin/notify"   # runs after traffic swap; failure is logged only
 
 [env]
 DATABASE_PATH = "${data_dir}/my-app.db"
@@ -189,14 +191,21 @@ All core functionality is built, tested, and working:
 - [x] systemd service generation with hardening (`vela setup`)
 - [x] CI/CD pipeline with multi-platform release builds
 - [x] Install script (auto-detects platform)
+- [x] Process supervision with auto-restart on crash
+- [x] Manifest env vars persisted across daemon restarts
+- [x] Deploy hooks (`pre_start` and `post_deploy`)
+- [x] HTTP → HTTPS redirect (with ACME challenge passthrough)
+- [x] ACME certificate auto-renewal (checks daily, renews at 30 days before expiry)
 
 Coming next:
 
+- [ ] Service dependencies: Postgres lifecycle management ([#3](https://github.com/raskell-io/vela/issues/3))
+- [ ] Service dependencies: NATS lifecycle management ([#4](https://github.com/raskell-io/vela/issues/4))
+- [ ] Service dependencies: generic framework ([#5](https://github.com/raskell-io/vela/issues/5))
+- [ ] Built-in scheduled backups ([#7](https://github.com/raskell-io/vela/issues/7))
+- [ ] Remote build support ([#10](https://github.com/raskell-io/vela/issues/10))
 - [ ] Process isolation (Linux namespaces, cgroups v2)
 - [ ] Resource limits (memory, CPU weight)
-- [ ] Certificate auto-renewal
-- [ ] Litestream integration for SQLite backups
-- [ ] Multi-server deploys
 
 ## Building from Source
 

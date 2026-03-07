@@ -9,10 +9,10 @@ Vela ships as one binary. The same binary runs on your server and your laptop.
 ```
 vela
 ├── serve           → Server mode (Linux only)
-│   ├── Reverse proxy (Pingora)
+│   ├── Reverse proxy (hyper)
 │   ├── Process manager
-│   ├── Deploy receiver
-│   └── SQLite state
+│   ├── IPC daemon (Unix socket)
+│   └── Filesystem state
 │
 ├── deploy          → Client mode (any platform)
 │   ├── Read Vela.toml
@@ -47,11 +47,11 @@ Vela uses Linux process isolation where it matters:
 
 ## Reverse Proxy
 
-Vela embeds [Pingora](https://github.com/cloudflare/pingora), Cloudflare's Rust proxy framework.
+Vela embeds a hyper-based reverse proxy with TLS termination via tokio-rustls.
 
 ```
-Internet → :443 (TLS) → Pingora → route by Host header → app on :10xxx
-         → :80  (redirect to HTTPS)
+Internet → :443 (TLS) → hyper → route by Host header → app on :10xxx
+         → :80  (redirect to HTTPS, except ACME challenges)
 ```
 
 The route table maps domains to upstream ports:
@@ -61,9 +61,29 @@ cyanea.bio    → 127.0.0.1:10001
 archipelag.io → 127.0.0.1:10002
 ```
 
-When a deploy swaps, the route table updates atomically. Pingora handles connection draining.
+When a deploy swaps, the route table updates atomically. Old connections drain for `drain_seconds` before the previous instance is stopped.
 
-TLS certificates are provisioned automatically via Let's Encrypt (ACME protocol).
+### TLS
+
+Two modes:
+
+- **ACME (Let's Encrypt)** — Set `acme_email` in server.toml. Vela provisions certs on first request and renews them automatically when they're within 30 days of expiry. HTTP-01 challenge validation on port 80.
+- **Static certs** — Set `cert` and `key` paths in server.toml. Use with Cloudflare Origin Certificates or any custom cert.
+
+HTTP requests are automatically redirected to HTTPS (301) when TLS is configured, except for `/.well-known/acme-challenge/` paths needed for ACME validation.
+
+## IPC Architecture
+
+The `vela serve` daemon owns all app processes. Client-initiated operations (deploy, rollback) communicate with the daemon via a Unix socket at `/var/vela/vela.sock`.
+
+```
+vela deploy (laptop)
+  → ssh root@server vela _deploy <app>
+    → connects to /var/vela/vela.sock
+      → daemon starts new process, health checks, swaps proxy
+```
+
+This ensures the daemon is always the parent of all app processes and can supervise them.
 
 ## Process Manager
 
@@ -73,21 +93,40 @@ Each app runs as a child process of the Vela daemon. The process manager:
 2. **Starts the process** with `PORT`, `VELA_DATA_DIR`, and user-defined env vars
 3. **Monitors health** via HTTP health checks
 4. **Manages the swap** (blue-green or sequential)
-5. **Handles signals** for graceful shutdown
+5. **Handles signals** for graceful shutdown (SIGTERM → wait `drain_seconds` → SIGKILL)
+6. **Supervises processes** — automatically restarts crashed apps
 
-Processes are tracked in memory with their PID and port. State (which release is active) is persisted in SQLite.
+### Process Supervision
+
+When a deployed app process exits unexpectedly, the daemon restarts it automatically using the stored launch configuration (port, env vars, release directory). Intentional stops during deploys or rollbacks do not trigger auto-restart.
 
 ## State
 
-Server state lives in `/var/vela/vela.db` (SQLite):
+Server state is entirely filesystem-backed. No database.
 
-```sql
-apps       — registered apps (name, domain, type, health path, strategy)
-releases   — deploy history (app, release_id, status, timestamps)
-secrets    — encrypted env vars per app
+```
+/var/vela/
+├── vela.sock                    # IPC Unix socket
+├── tls/                         # ACME certificates
+│   ├── cyanea.bio.pem
+│   └── cyanea.bio-key.pem
+├── logs/                        # App stdout/stderr logs
+└── apps/
+    └── my-app/
+        ├── app.toml             # App config (name, domain, type, strategy, env)
+        ├── secrets.env          # KEY=VALUE, mode 0600
+        ├── data/                # Persistent (never touched by deploys)
+        │   └── my-app.db        # SQLite databases go here
+        ├── releases/
+        │   ├── 20260305-001/    # Old release (kept for rollback)
+        │   └── 20260305-002/    # Current release
+        └── current -> releases/20260305-002
 ```
 
-SQLite is the right choice here: single-writer, crash-safe, zero-config, and the state is small.
+Key invariants:
+- **Deploy never touches `/data`**. Databases, uploads, and persistent state survive across deploys.
+- **Manifest `[env]` vars are persisted** in `app.toml` and restored on daemon restart.
+- **Secrets stay separate** from config in `secrets.env`, mode 0600.
 
 ## SSH as Control Plane
 
@@ -104,32 +143,15 @@ This means:
 - Works through firewalls and bastion hosts
 - `scp` for file transfer (artifact upload)
 
-## Directory Layout
+## Deploy Hooks
 
-```
-/var/vela/                        # Server root
-├── vela.db                       # SQLite state
-├── secrets/                      # Per-app secret env files
-│   ├── my-app.env
-│   └── other-app.env
-└── apps/
-    └── my-app/
-        ├── app.toml              # App config (from Vela.toml)
-        ├── data/                 # Persistent data (survives deploys)
-        │   └── my-app.db         # SQLite databases go here
-        ├── releases/
-        │   ├── 20260305-001/     # Old release (kept for rollback)
-        │   └── 20260305-002/     # Current release
-        └── current -> releases/20260305-002
-```
+Two hooks run at specific points during deployment:
 
-Key invariant: **deploy never touches `/data`**. Your database files, uploaded assets, and any other persistent state live in the data directory and survive across deploys.
+- **`pre_start`** — Runs after extraction, before the app starts. If it fails (non-zero exit), the deploy aborts and the old instance stays. Use for database migrations.
+- **`post_deploy`** — Runs after traffic switches to the new instance. Failures are logged but don't roll back. Use for cache warming, notifications, etc.
 
-## Future: Multi-Server
+Both hooks run with the same environment variables as the app and inherit the release directory as their working directory.
 
-The current design is single-server. Future versions may support:
-- Multiple servers in a `Vela.toml` (deploy to all)
-- Health-based routing across servers
-- SQLite replication via Litestream for backups
+## Future: Service Dependencies
 
-But single-server covers a surprising range of use cases, and that's the focus for now.
+The current design manages apps only. Future versions will support declarative service dependencies (Postgres, NATS, Redis) that Vela provisions and wires into apps automatically. See the [roadmap](https://github.com/raskell-io/vela/issues) for details.

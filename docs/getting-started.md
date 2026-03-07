@@ -21,7 +21,7 @@ This detects your platform (linux/amd64 or linux/arm64), downloads the latest re
 To install a specific version or to a different directory:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/raskell-io/vela/main/install.sh | bash -s -- --version v0.1.0 --to /opt/bin
+curl -fsSL https://raw.githubusercontent.com/raskell-io/vela/main/install.sh | bash -s -- --version v0.3.0 --to /opt/bin
 ```
 
 Create the server config:
@@ -174,5 +174,5 @@ curl -fsSL https://raw.githubusercontent.com/raskell-io/vela/main/install.sh | b
 Or pin a specific version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/raskell-io/vela/main/install.sh | bash -s -- --version v0.2.0
+curl -fsSL https://raw.githubusercontent.com/raskell-io/vela/main/install.sh | bash -s -- --version v0.3.0
 ```

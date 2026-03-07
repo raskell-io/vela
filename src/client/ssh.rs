@@ -109,6 +109,121 @@ pub fn run_remote(server: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// Upload source code to the server via git archive + scp.
+pub fn upload_source(server: &str, app_name: &str) -> Result<()> {
+    let tarball = std::env::temp_dir().join(format!("vela-source-{app_name}.tar.gz"));
+
+    // Create a tarball of the current git repo
+    let status = Command::new("git")
+        .args([
+            "archive",
+            "--format=tar.gz",
+            "-o",
+            &tarball.to_string_lossy(),
+            "HEAD",
+        ])
+        .status()
+        .context("failed to run git archive — is this a git repo?")?;
+
+    if !status.success() {
+        anyhow::bail!("git archive failed");
+    }
+
+    // Upload to server
+    let remote_path = format!("/tmp/vela-source-{app_name}.tar.gz");
+    let status = Command::new("scp")
+        .args([
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            &tarball.to_string_lossy(),
+            &format!("{server}:{remote_path}"),
+        ])
+        .status()
+        .context("failed to upload source")?;
+
+    if !status.success() {
+        anyhow::bail!("scp failed uploading source");
+    }
+
+    let _ = std::fs::remove_file(&tarball);
+    Ok(())
+}
+
+/// Run a build command on the remote server.
+pub fn remote_build(
+    server: &str,
+    app_name: &str,
+    build_command: &str,
+    build_env: &std::collections::HashMap<String, String>,
+) -> Result<()> {
+    // Extract source, run build, then create the deploy tarball from the build output
+    let script = format!(
+        r#"set -e
+BUILD_DIR="/tmp/vela-build-{app_name}"
+rm -rf "$BUILD_DIR"
+mkdir -p "$BUILD_DIR"
+tar xzf /tmp/vela-source-{app_name}.tar.gz -C "$BUILD_DIR"
+cd "$BUILD_DIR"
+{build_command}
+"#
+    );
+
+    let mut cmd = Command::new("ssh");
+    cmd.args(["-o", "StrictHostKeyChecking=accept-new", server, "bash", "-c"]);
+
+    // Pass build env vars via SSH
+    let mut env_prefix = String::new();
+    for (k, v) in build_env {
+        env_prefix.push_str(&format!("export {k}={v}\n"));
+    }
+
+    let full_script = format!("{env_prefix}{script}");
+    cmd.arg(&full_script);
+
+    let status = cmd.status().context("failed to run remote build")?;
+
+    if !status.success() {
+        anyhow::bail!("remote build failed");
+    }
+
+    Ok(())
+}
+
+/// Activate a deploy from a remote build.
+/// The build output is already on the server; we tar it and activate.
+pub fn activate_remote_build(server: &str, app_name: &str, manifest_toml: &str) -> Result<()> {
+    // On the server: tar the build output and move it to the deploy location
+    let prep_script = format!(
+        r#"set -e
+BUILD_DIR="/tmp/vela-build-{app_name}"
+TARBALL="/tmp/vela-deploy-{app_name}.tar.gz"
+cd "$BUILD_DIR"
+tar czf "$TARBALL" .
+rm -rf "$BUILD_DIR"
+rm -f /tmp/vela-source-{app_name}.tar.gz
+"#
+    );
+
+    let status = Command::new("ssh")
+        .args([
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            server,
+            "bash",
+            "-c",
+            &prep_script,
+        ])
+        .status()
+        .context("failed to prepare remote build artifact")?;
+
+    if !status.success() {
+        anyhow::bail!("failed to prepare remote build artifact");
+    }
+
+    // Now activate via the normal _deploy command
+    activate(server, app_name, manifest_toml)
+}
+
 /// Run a command on the remote server interactively (for log tailing, etc).
 pub fn run_remote_interactive(server: &str, args: &[&str]) -> Result<()> {
     let status = Command::new("ssh")

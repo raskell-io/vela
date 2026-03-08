@@ -61,6 +61,7 @@ pub fn start_proxy(
     challenge_store: ChallengeStore,
     cert_resolver: Option<Arc<CertResolver>>,
 ) -> anyhow::Result<ProxyHandle> {
+    let client_verifier = build_client_verifier(&config.tls)?;
     let http_port = config.proxy.http_port;
     let rt = route_table.clone();
     let cs = challenge_store.clone();
@@ -95,9 +96,10 @@ pub fn start_proxy(
                 tracing::warn!(err = %e, "failed to load static TLS cert into resolver");
             }
 
+            let cv = client_verifier.clone();
             tokio::spawn(async move {
                 if let Err(e) =
-                    run_https_proxy_dynamic(https_port, rt2, resolver, client_https).await
+                    run_https_proxy_dynamic(https_port, rt2, resolver, client_https, cv).await
                 {
                     tracing::error!(err = %e, "HTTPS proxy exited with error");
                 }
@@ -106,9 +108,10 @@ pub fn start_proxy(
             let cert_path = tls_config.cert.clone().unwrap();
             let key_path = tls_config.key.clone().unwrap();
 
+            let cv = client_verifier.clone();
             tokio::spawn(async move {
                 if let Err(e) =
-                    run_https_proxy(https_port, rt2, &cert_path, &key_path, client_https).await
+                    run_https_proxy(https_port, rt2, &cert_path, &key_path, client_https, cv).await
                 {
                     tracing::error!(err = %e, "HTTPS proxy exited with error");
                 }
@@ -135,7 +138,8 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
 type BoxBody = http_body_util::Full<hyper::body::Bytes>;
 
@@ -166,6 +170,7 @@ async fn run_http_proxy(
 
             if let Err(e) = http1::Builder::new()
                 .serve_connection(TokioIo::new(stream), service)
+                .with_upgrades()
                 .await
             {
                 tracing::debug!(addr = %addr, err = %e, "connection error");
@@ -180,16 +185,25 @@ async fn run_https_proxy(
     cert_path: &std::path::Path,
     key_path: &std::path::Path,
     client: reqwest::Client,
+    client_verifier: Option<Arc<dyn tokio_rustls::rustls::server::danger::ClientCertVerifier>>,
 ) -> anyhow::Result<()> {
     use tokio_rustls::TlsAcceptor;
 
     let certs = load_certs(cert_path)?;
     let key = load_private_key(key_path)?;
 
-    let tls_config = tokio_rustls::rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|e| anyhow::anyhow!("TLS config error: {e}"))?;
+    let builder = tokio_rustls::rustls::ServerConfig::builder();
+    let tls_config = if let Some(verifier) = client_verifier {
+        builder
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(certs, key)
+            .map_err(|e| anyhow::anyhow!("TLS config error: {e}"))?
+    } else {
+        builder
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|e| anyhow::anyhow!("TLS config error: {e}"))?
+    };
 
     let acceptor = TlsAcceptor::from(Arc::new(tls_config));
     let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await?;
@@ -218,6 +232,7 @@ async fn run_https_proxy(
 
             if let Err(e) = http1::Builder::new()
                 .serve_connection(TokioIo::new(tls_stream), service)
+                .with_upgrades()
                 .await
             {
                 tracing::debug!(addr = %addr, err = %e, "connection error");
@@ -231,12 +246,20 @@ async fn run_https_proxy_dynamic(
     route_table: RouteTable,
     cert_resolver: Arc<CertResolver>,
     client: reqwest::Client,
+    client_verifier: Option<Arc<dyn tokio_rustls::rustls::server::danger::ClientCertVerifier>>,
 ) -> anyhow::Result<()> {
     use tokio_rustls::TlsAcceptor;
 
-    let tls_config = tokio_rustls::rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_cert_resolver(cert_resolver);
+    let builder = tokio_rustls::rustls::ServerConfig::builder();
+    let tls_config = if let Some(verifier) = client_verifier {
+        builder
+            .with_client_cert_verifier(verifier)
+            .with_cert_resolver(cert_resolver)
+    } else {
+        builder
+            .with_no_client_auth()
+            .with_cert_resolver(cert_resolver)
+    };
 
     let acceptor = TlsAcceptor::from(Arc::new(tls_config));
     let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await?;
@@ -265,6 +288,7 @@ async fn run_https_proxy_dynamic(
 
             if let Err(e) = http1::Builder::new()
                 .serve_connection(TokioIo::new(tls_stream), service)
+                .with_upgrades()
                 .await
             {
                 tracing::debug!(addr = %addr, err = %e, "connection error");
@@ -327,6 +351,156 @@ async fn handle_http_request(
     forward_request(req, route_table, client).await
 }
 
+/// Check if a request is a WebSocket upgrade.
+fn is_websocket_upgrade(req: &Request<Incoming>) -> bool {
+    req.headers()
+        .get(hyper::header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+}
+
+/// Handle a WebSocket upgrade by tunneling to the upstream app.
+async fn handle_websocket_upgrade(
+    req: Request<Incoming>,
+    upstream_port: u16,
+) -> Result<Response<BoxBody>, hyper::Error> {
+    use hyper::body::Bytes;
+
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/")
+        .to_string();
+    let headers = req.headers().clone();
+
+    // Connect to upstream
+    let mut upstream = match TcpStream::connect(format!("127.0.0.1:{upstream_port}")).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(upstream_port, err = %e, "websocket upstream connect failed");
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .body(BoxBody::new(Bytes::from("502 Bad Gateway\n")))
+                .unwrap());
+        }
+    };
+
+    // Build raw HTTP upgrade request for upstream
+    let mut raw_req = format!("GET {path} HTTP/1.1\r\n");
+    for (name, value) in &headers {
+        if let Ok(v) = value.to_str() {
+            raw_req.push_str(&format!("{}: {v}\r\n", name.as_str()));
+        }
+    }
+    raw_req.push_str("\r\n");
+
+    if let Err(e) = upstream.write_all(raw_req.as_bytes()).await {
+        tracing::warn!(err = %e, "websocket upstream write failed");
+        return Ok(Response::builder()
+            .status(StatusCode::BAD_GATEWAY)
+            .body(BoxBody::new(Bytes::from("502 Bad Gateway\n")))
+            .unwrap());
+    }
+
+    // Read upstream response headers (until \r\n\r\n)
+    let mut buf = vec![0u8; 4096];
+    let mut total = 0;
+    let header_end;
+    loop {
+        match upstream.read(&mut buf[total..]).await {
+            Ok(0) => {
+                tracing::warn!("websocket upstream closed before response");
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .body(BoxBody::new(Bytes::from("502 Bad Gateway\n")))
+                    .unwrap());
+            }
+            Ok(n) => {
+                total += n;
+                if let Some(pos) = buf[..total].windows(4).position(|w| w == b"\r\n\r\n") {
+                    header_end = pos + 4;
+                    break;
+                }
+                if total >= buf.len() {
+                    buf.resize(total + 4096, 0);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(err = %e, "websocket upstream read failed");
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .body(BoxBody::new(Bytes::from("502 Bad Gateway\n")))
+                    .unwrap());
+            }
+        }
+    }
+
+    // Parse upstream response status and headers
+    let header_str = String::from_utf8_lossy(&buf[..header_end]);
+    let mut lines = header_str.split("\r\n");
+
+    let status_line = lines.next().unwrap_or("");
+    let status_code = status_line
+        .split(' ')
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(502);
+
+    if status_code != 101 {
+        tracing::warn!(status_code, "websocket upstream rejected upgrade");
+        return Ok(Response::builder()
+            .status(StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_GATEWAY))
+            .body(BoxBody::new(Bytes::from("upstream rejected websocket\n")))
+            .unwrap());
+    }
+
+    // Build 101 response for client, forwarding upstream headers
+    let mut resp = Response::builder().status(StatusCode::SWITCHING_PROTOCOLS);
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            resp = resp.header(name.trim(), value.trim());
+        }
+    }
+
+    // Any bytes after the headers are early WebSocket frames
+    let remaining = buf[header_end..total].to_vec();
+
+    // Spawn task to bridge client ↔ upstream after hyper completes the upgrade
+    tokio::spawn(async move {
+        match hyper::upgrade::on(req).await {
+            Ok(upgraded) => {
+                let mut client = TokioIo::new(upgraded);
+
+                // Forward any early upstream data to client
+                if !remaining.is_empty() {
+                    if let Err(e) = client.write_all(&remaining).await {
+                        tracing::debug!(err = %e, "websocket: failed to write remaining data");
+                        return;
+                    }
+                }
+
+                match tokio::io::copy_bidirectional(&mut client, &mut upstream).await {
+                    Ok((to_upstream, to_client)) => {
+                        tracing::debug!(to_upstream, to_client, "websocket tunnel closed");
+                    }
+                    Err(e) => {
+                        tracing::debug!(err = %e, "websocket tunnel ended");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(err = %e, "websocket upgrade failed");
+            }
+        }
+    });
+
+    Ok(resp.body(BoxBody::new(Bytes::new())).unwrap())
+}
+
 /// Forward a request to the upstream app based on the Host header.
 async fn forward_request(
     req: Request<Incoming>,
@@ -353,6 +527,12 @@ async fn forward_request(
             return Ok(resp);
         }
     };
+
+    // WebSocket upgrade — tunnel directly instead of using reqwest
+    if is_websocket_upgrade(&req) {
+        tracing::debug!(host, upstream_port, "websocket upgrade");
+        return handle_websocket_upgrade(req, upstream_port).await;
+    }
 
     let uri = format!(
         "http://127.0.0.1:{upstream_port}{}",
@@ -431,6 +611,32 @@ fn load_certs(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| anyhow::anyhow!("failed to parse cert: {e}"))?;
     Ok(certs)
+}
+
+/// Build an optional client certificate verifier from the TLS config.
+/// When `client_ca` is set, returns a verifier that requires valid client certs
+/// signed by the specified CA (e.g. Cloudflare Authenticated Origin Pulls).
+fn build_client_verifier(
+    tls_config: &crate::config::TlsConfig,
+) -> anyhow::Result<Option<Arc<dyn tokio_rustls::rustls::server::danger::ClientCertVerifier>>> {
+    let ca_path = match &tls_config.client_ca {
+        Some(path) => path,
+        None => return Ok(None),
+    };
+
+    let ca_certs = load_certs(ca_path)?;
+    let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
+    for cert in ca_certs {
+        root_store.add(cert)?;
+    }
+
+    let verifier =
+        tokio_rustls::rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store))
+            .build()
+            .map_err(|e| anyhow::anyhow!("failed to build client cert verifier: {e}"))?;
+
+    tracing::info!(ca = %ca_path.display(), "client certificate verification enabled");
+    Ok(Some(verifier))
 }
 
 fn load_private_key(

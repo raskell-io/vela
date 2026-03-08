@@ -67,12 +67,14 @@ pub fn upload(server: &str, tarball: &Path, app_name: &str) -> Result<()> {
 
 /// Tell the remote server to activate a deploy.
 pub fn activate(server: &str, app_name: &str, manifest_toml: &str) -> Result<()> {
-    // Send the manifest content via stdin to avoid escaping issues
+    // Send the manifest content via stdin to avoid escaping issues.
+    // Use sudo so scoped sudoers (e.g. deploy user) can run vela _deploy.
     let mut child = Command::new("ssh")
         .args([
             "-o",
             "StrictHostKeyChecking=accept-new",
             server,
+            "sudo",
             "vela",
             "_deploy",
             app_name,
@@ -110,6 +112,7 @@ pub fn run_remote(server: &str, args: &[&str]) -> Result<()> {
 }
 
 /// Upload source code to the server via git archive + scp.
+/// Placed at the deploy tarball path so `_deploy` can find it.
 pub fn upload_source(server: &str, app_name: &str) -> Result<()> {
     let tarball = std::env::temp_dir().join(format!("vela-source-{app_name}.tar.gz"));
 
@@ -129,7 +132,7 @@ pub fn upload_source(server: &str, app_name: &str) -> Result<()> {
         anyhow::bail!("git archive failed");
     }
 
-    // Upload to server
+    // Upload to server at the deploy tarball path (_deploy looks here)
     let remote_path = format!("/tmp/vela-source-{app_name}.tar.gz");
     let status = Command::new("scp")
         .args([
@@ -169,7 +172,13 @@ cd "$BUILD_DIR"
     );
 
     let mut cmd = Command::new("ssh");
-    cmd.args(["-o", "StrictHostKeyChecking=accept-new", server, "bash", "-c"]);
+    cmd.args([
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        server,
+        "bash",
+        "-c",
+    ]);
 
     // Pass build env vars via SSH
     let mut env_prefix = String::new();

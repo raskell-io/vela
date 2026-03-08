@@ -92,28 +92,26 @@ pub fn deploy(args: DeployArgs) -> Result<()> {
     Ok(())
 }
 
-/// Deploy using remote build: upload source, build on server, then deploy.
+/// Deploy using remote build: upload source, then let `sudo vela _deploy`
+/// handle the build + activation on the server (runs as root via scoped sudo).
 fn deploy_remote_build(
     manifest_path: &Path,
     _manifest: &Manifest,
     server: &str,
     app_name: &str,
-    build: &crate::config::BuildConfig,
+    _build: &crate::config::BuildConfig,
 ) -> Result<()> {
     println!("deploying {app_name} to {server} (remote build)");
 
-    // 1. Upload source via git archive
+    // 1. Upload source via git archive → deploy tarball location
+    //    _deploy will detect [build] in the manifest and treat it as source.
     println!("  uploading source...");
     ssh::upload_source(server, app_name)?;
 
-    // 2. Build on the server
-    println!("  building on server...");
-    ssh::remote_build(server, app_name, &build.command, &build.env)?;
-
-    // 3. Activate the deploy (the build output is already on the server)
-    println!("  activating...");
+    // 2. Activate via sudo vela _deploy — handles build + deploy as root
+    println!("  building & activating on server...");
     let manifest_toml = std::fs::read_to_string(manifest_path)?;
-    ssh::activate_remote_build(server, app_name, &manifest_toml)?;
+    ssh::activate(server, app_name, &manifest_toml)?;
 
     println!("deployed {app_name} to {server}");
 

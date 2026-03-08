@@ -9,7 +9,7 @@ pub(crate) mod service;
 mod state;
 
 use std::io::Read as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -441,7 +441,72 @@ pub fn internal_deploy(args: InternalDeployArgs) -> Result<()> {
 
     let manifest = Manifest::from_toml_str(&manifest_str)?;
 
-    // Find the uploaded tarball
+    // Remote build: if manifest has [build], build from source first
+    if let Some(ref build) = manifest.build
+        && build.remote
+    {
+        let source_path = format!("/tmp/vela-source-{app_name}.tar.gz");
+        let source = Path::new(&source_path);
+        if !source.exists() {
+            anyhow::bail!("source tarball not found at {source_path}");
+        }
+
+        let build_dir = PathBuf::from(format!("/tmp/vela-build-{app_name}"));
+        if build_dir.exists() {
+            std::fs::remove_dir_all(&build_dir)?;
+        }
+        std::fs::create_dir_all(&build_dir)?;
+
+        // Extract source
+        let status = std::process::Command::new("tar")
+            .args(["xzf", &source_path, "-C", &build_dir.to_string_lossy()])
+            .status()
+            .context("failed to extract source")?;
+        if !status.success() {
+            anyhow::bail!("failed to extract source tarball");
+        }
+
+        // Run build command with build env vars
+        eprintln!("  building from source...");
+        let mut cmd = std::process::Command::new("bash");
+        cmd.args(["-c", &build.command]);
+        cmd.current_dir(&build_dir);
+        for (k, v) in &build.env {
+            cmd.env(k, v);
+        }
+
+        let status = cmd.status().context("failed to run build command")?;
+        if !status.success() {
+            let _ = std::fs::remove_dir_all(&build_dir);
+            let _ = std::fs::remove_file(source);
+            anyhow::bail!(
+                "build failed with exit code {}",
+                status.code().unwrap_or(-1)
+            );
+        }
+
+        // Package build output as deploy tarball
+        let deploy_tarball_path = format!("/tmp/vela-deploy-{app_name}.tar.gz");
+        let status = std::process::Command::new("tar")
+            .args([
+                "czf",
+                &deploy_tarball_path,
+                "-C",
+                &build_dir.to_string_lossy(),
+                ".",
+            ])
+            .status()
+            .context("failed to create deploy tarball")?;
+        if !status.success() {
+            anyhow::bail!("failed to create deploy tarball from build output");
+        }
+
+        let _ = std::fs::remove_dir_all(&build_dir);
+        let _ = std::fs::remove_file(source);
+        eprintln!("  build complete");
+    }
+
+    // Find the uploaded (or just-built) tarball
     let tarball_path = format!("/tmp/vela-deploy-{app_name}.tar.gz");
     let tarball = Path::new(&tarball_path);
     if !tarball.exists() {
@@ -768,7 +833,13 @@ pub fn internal_backup(args: InternalBackupArgs) -> Result<()> {
         .build()?;
 
     rt.block_on(async {
-        backup::run_backup(backup_config, &config.apps_dir(), &config.services_dir(), &state).await
+        backup::run_backup(
+            backup_config,
+            &config.apps_dir(),
+            &config.services_dir(),
+            &state,
+        )
+        .await
     })?;
 
     println!("backup completed");

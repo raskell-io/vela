@@ -255,6 +255,10 @@ pub struct TlsConfig {
     /// Path to TLS private key
     #[serde(default)]
     pub key: Option<PathBuf>,
+
+    /// Path to CA certificate for client authentication (e.g. Cloudflare Authenticated Origin Pulls)
+    #[serde(default)]
+    pub client_ca: Option<PathBuf>,
 }
 
 impl Manifest {

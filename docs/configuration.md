@@ -118,6 +118,50 @@ vela secret remove my-app SECRET_KEY_BASE
 
 Secrets are injected as environment variables when your app starts. Reference them in `Vela.toml` with `${secret:KEY}`.
 
+## Status and Monitoring
+
+Check the health of all running apps:
+
+```bash
+# Human-readable output
+vela status
+```
+
+```
+vela 0.4.0 — active, 2 app(s)
+
+  cyanea          app.cyanea.bio          healthy (HTTP 200)   pid 38604   up 1d 21h
+  coordinator     app.archipelag.io       healthy (HTTP 200)   pid 38148   up 1d 21h
+```
+
+```bash
+# Machine-readable JSON (for monitoring scripts)
+vela status --json
+```
+
+```json
+[
+  {
+    "name": "cyanea",
+    "domain": "app.cyanea.bio",
+    "release": "20260306-145045",
+    "strategy": "sequential",
+    "pid": 38604,
+    "port": 10001,
+    "uptime_seconds": 162000,
+    "health": "healthy"
+  }
+]
+```
+
+The `--json` output queries the running daemon via IPC for live process info. Each app's health endpoint is probed with a 3-second timeout. The `health` field is one of:
+
+| Value | Meaning |
+|-------|---------|
+| `healthy` | Health endpoint returned HTTP 200 |
+| `unhealthy` | Health endpoint failed or timed out |
+| `unknown` | No health path configured for this app |
+
 ## Services (Service Dependencies)
 
 Declare services your app depends on in `[services]`. Vela provisions them on first deploy and injects connection environment variables automatically.

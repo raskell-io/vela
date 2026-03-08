@@ -177,8 +177,11 @@ Once provisioned, Vela automatically renews certificates when they're within 30 
 ## Post-Deploy Operations
 
 ```bash
-# Check app status
+# Check app status (human-readable with health, PID, uptime)
 vela status
+
+# Machine-readable status (for monitoring scripts)
+vela status --json
 
 # Tail logs
 vela logs your-app -f

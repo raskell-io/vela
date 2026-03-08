@@ -148,7 +148,7 @@ databases = ["my_app_prod"]
 | `vela setup` | Generate and install systemd service |
 | `vela init` | Generate a Vela.toml |
 | `vela deploy <artifact>` | Deploy an app |
-| `vela status` | Show running apps |
+| `vela status [--json]` | Show running apps (with live health, PID, uptime) |
 | `vela logs <app> [-f]` | Tail app logs |
 | `vela rollback [<app>]` | Roll back to previous release |
 | `vela secret set <app> KEY=VALUE` | Set a secret |
@@ -214,6 +214,7 @@ All core functionality is built, tested, and working:
 - [x] Service dependencies framework (ServiceManager with per-service state persistence)
 - [x] Scheduled backups (app data, secrets, pg_dump — local or S3)
 - [x] Remote build support (git archive upload, build on server)
+- [x] Machine-readable status (`vela status --json` with live health probes, PID, uptime)
 
 Coming next:
 

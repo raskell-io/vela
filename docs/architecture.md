@@ -83,6 +83,11 @@ vela deploy (laptop)
   → ssh root@server vela _deploy <app>
     → connects to /var/vela/vela.sock
       → daemon starts new process, health checks, swaps proxy
+
+vela status --json (laptop)
+  → ssh root@server vela apps --json
+    → connects to /var/vela/vela.sock
+      → daemon reports live PID, port, uptime, health for each app
 ```
 
 This ensures the daemon is always the parent of all app processes and can supervise them.

@@ -580,6 +580,7 @@ pub fn internal_rollback(args: InternalRollbackArgs) -> Result<()> {
                 health_path: app.health_path.clone(),
                 drain_seconds: app.drain_seconds,
                 domain: app.domain.clone(),
+                services: std::collections::HashMap::new(),
             },
         )
         .await?;

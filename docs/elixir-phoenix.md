@@ -147,6 +147,60 @@ end
 
 The hook runs with the same environment as your app (`DATABASE_PATH`, secrets, etc.), so Ecto connects to the right database.
 
+## Postgres with Services
+
+Instead of managing Postgres yourself, declare it in your `Vela.toml`:
+
+```toml
+[services.postgres]
+version = "17"
+databases = ["my_app_prod"]
+```
+
+Vela installs PostgreSQL on the server, creates the database and user, and injects `DATABASE_URL` into your app automatically. No manual setup needed.
+
+Configure your repo to use it:
+
+```elixir
+# config/runtime.exs
+config :my_app, MyApp.Repo,
+  url: System.get_env("DATABASE_URL")
+```
+
+## NATS with Services
+
+For apps that use NATS messaging:
+
+```toml
+[services.nats]
+version = "2.10"
+jetstream = true
+```
+
+Vela downloads, configures, and supervises a NATS server. `NATS_URL` is injected into your app.
+
+## Remote Builds
+
+Build your Elixir release on the server instead of locally:
+
+```toml
+[build]
+remote = true
+command = """
+mix deps.get --only prod
+MIX_ENV=prod mix compile
+MIX_ENV=prod mix assets.deploy
+MIX_ENV=prod mix release
+"""
+
+[build.env]
+MIX_ENV = "prod"
+```
+
+With remote builds, you don't pass an artifact — just run `vela deploy`. Source is uploaded via `git archive` and built on the server.
+
+This is useful when you don't have the BEAM installed locally or when the server architecture differs from your laptop.
+
 ## Tips
 
 - **WAL mode**: Enable SQLite WAL mode for better concurrent read performance. Set `journal_mode: :wal` in your repo config.

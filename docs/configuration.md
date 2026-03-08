@@ -117,3 +117,94 @@ vela secret remove my-app SECRET_KEY_BASE
 ```
 
 Secrets are injected as environment variables when your app starts. Reference them in `Vela.toml` with `${secret:KEY}`.
+
+## Services (Service Dependencies)
+
+Declare services your app depends on in `[services]`. Vela provisions them on first deploy and injects connection environment variables automatically.
+
+### Postgres
+
+```toml
+[services.postgres]
+version = "17"                # PostgreSQL version (default: "17")
+databases = ["myapp_prod"]    # Databases to create
+```
+
+Vela installs PostgreSQL via apt (if not present), creates a user and database with a generated password, and injects:
+
+| Variable | Value |
+|----------|-------|
+| `DATABASE_URL` | `postgres://<db>:<password>@localhost/<db>` |
+
+Credentials are stored in `/var/vela/services/postgres/state.toml` and reused across deploys.
+
+### NATS
+
+```toml
+[services.nats]
+version = "2.10"    # NATS server version (default: "2.10")
+jetstream = true    # Enable JetStream (default: false)
+```
+
+Vela downloads the NATS binary from GitHub releases, generates a config file, starts it as a supervised child process, and injects:
+
+| Variable | Value |
+|----------|-------|
+| `NATS_URL` | `nats://localhost:4222` |
+
+NATS listens on `127.0.0.1:4222` (client) and `127.0.0.1:8222` (monitoring/health).
+
+## Build (Remote Builds)
+
+Build your app on the server instead of locally. Useful for Elixir releases or when cross-compilation is impractical.
+
+```toml
+[build]
+remote = true                  # Enable remote build (default: false)
+command = "mix release"        # Build command to run on the server
+
+[build.env]
+MIX_ENV = "prod"               # Environment variables for the build
+```
+
+When `remote = true`, `vela deploy` uploads your source via `git archive` (no artifact argument needed), runs the build command on the server, and activates the result through the normal deploy flow.
+
+**Note:** Your project must be a git repository. Only committed files are uploaded (via `git archive HEAD`).
+
+## Backup (Server Config)
+
+Configure scheduled backups in `server.toml`. Vela backs up app data, secrets, and Postgres databases automatically.
+
+```toml
+[backup]
+schedule = "daily"                    # "hourly", "daily", or interval like "12h"
+retain = 7                            # Number of backups to keep
+destination = "/var/backups/vela"     # Local path or "s3://bucket/prefix"
+
+[backup.include]
+app_data = true     # Back up app data directories (default: true)
+secrets = true      # Back up secrets.env files (default: true)
+postgres = true     # Back up Postgres databases via pg_dump (default: true)
+```
+
+### Destinations
+
+**Local directory** — Backups are copied to the specified path. Old backups are deleted when count exceeds `retain`.
+
+**S3-compatible storage** — Set `destination = "s3://bucket/prefix"`. Requires the `aws` CLI to be installed and configured on the server.
+
+### What Gets Backed Up
+
+- **App data**: Persistent data directories (`/var/vela/apps/<app>/data/`). SQLite WAL files are checkpointed before copy for consistency.
+- **Secrets**: `secrets.env` and `app.toml` config for each app.
+- **Postgres**: `pg_dump` of each provisioned database (gzip compressed).
+
+### Manual Backup
+
+Trigger a backup from your laptop:
+
+```bash
+vela backup
+```
+
+This SSHs into the server and runs the backup immediately using the `[backup]` config from `server.toml`.

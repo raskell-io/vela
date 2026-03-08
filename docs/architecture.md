@@ -11,16 +11,18 @@ vela
 ├── serve           → Server mode (Linux only)
 │   ├── Reverse proxy (hyper)
 │   ├── Process manager
+│   ├── Service manager (Postgres, NATS)
+│   ├── Backup scheduler
 │   ├── IPC daemon (Unix socket)
 │   └── Filesystem state
 │
 ├── deploy          → Client mode (any platform)
 │   ├── Read Vela.toml
-│   ├── Create tarball
+│   ├── Create tarball (or git archive for remote builds)
 │   ├── Upload via scp
 │   └── Activate via ssh
 │
-├── init / status / logs / rollback / secret
+├── init / status / logs / rollback / secret / backup
 │   └── Client commands (SSH into server)
 │
 └── apps            → Server-side management (Linux only)
@@ -152,6 +154,70 @@ Two hooks run at specific points during deployment:
 
 Both hooks run with the same environment variables as the app and inherit the release directory as their working directory.
 
-## Future: Service Dependencies
+## Service Dependencies
 
-The current design manages apps only. Future versions will support declarative service dependencies (Postgres, NATS, Redis) that Vela provisions and wires into apps automatically. See the [roadmap](https://github.com/raskell-io/vela/issues) for details.
+Vela manages external services that your apps depend on. Declare them in `[services]` in your `Vela.toml` and Vela handles provisioning, supervision, and environment variable injection.
+
+### Supported Services
+
+**Postgres** — Installed via `apt`, managed by systemd. Vela creates databases and users with generated passwords, verifies readiness via `pg_isready`, and injects `DATABASE_URL` into your app.
+
+**NATS** — Downloaded as a binary from GitHub releases. Runs as a daemon child process (supervised alongside your apps). Supports JetStream. Injects `NATS_URL` into your app.
+
+### How It Works
+
+```
+vela deploy (with [services] in Vela.toml)
+  → IPC to daemon with service config
+    → ServiceManager.ensure_service()
+      → Install/download if needed
+      → Provision databases/config
+      → Start process (NATS) or verify running (Postgres)
+      → Return env vars (DATABASE_URL, NATS_URL)
+    → Merge env vars into app environment
+    → Start app with injected env
+```
+
+Service state is persisted to `/var/vela/services/<type>/state.toml`. On daemon restart, services are restored automatically — Postgres via systemd, NATS by relaunching the child process.
+
+### Service Supervision
+
+The daemon supervises NATS alongside your apps. If the NATS process exits unexpectedly, it is restarted automatically. Postgres is managed by systemd and checked for readiness on restore.
+
+### Filesystem Layout
+
+```
+/var/vela/services/
+├── postgres/
+│   └── state.toml          # Tracks provisioned databases and credentials
+└── nats/
+    ├── nats-server          # Downloaded binary
+    ├── nats.conf            # Generated config (listen, JetStream, etc.)
+    ├── nats.log             # NATS stdout/stderr
+    ├── data/                # JetStream storage
+    └── state.toml           # Port, provisioned flag
+```
+
+## Scheduled Backups
+
+Vela can automatically back up app data, secrets, and Postgres databases on a schedule. Configure `[backup]` in `server.toml`.
+
+Backups include:
+- **App data** — SQLite databases and persistent files (with WAL checkpoint before copy)
+- **Secrets** — `secrets.env` and `app.toml` config files
+- **Postgres** — `pg_dump` of all provisioned databases (gzip compressed)
+
+Destinations: local directory or S3-compatible storage (via `aws` CLI). Old backups are pruned according to the `retain` count.
+
+## Remote Builds
+
+For apps that need to be built on the server (e.g., Elixir releases), Vela supports remote builds. Set `[build] remote = true` in your `Vela.toml`.
+
+```
+vela deploy (with [build] remote = true)
+  → git archive → upload source via scp
+  → ssh: extract source, run build command
+  → ssh: tar build output, activate via normal deploy flow
+```
+
+Source is uploaded via `git archive` (excludes node_modules, target, etc.). The build runs on the server with configurable environment variables.

@@ -21,17 +21,18 @@ vela deploy ./target/release/my-app
 │     ├─ 4a. Generate release ID (timestamp: 20260305-143022)
 │     ├─ 4b. Extract tarball → /var/vela/apps/<app>/releases/<id>/
 │     ├─ 4c. Register app config (upsert app.toml, persist env)
-│     ├─ 4d. Run pre_start hook (if configured; abort on failure)
-│     ├─ 4e. Start new instance on random port
-│     ├─ 4f. Run health check (retry up to 30 times, 1s apart)
+│     ├─ 4d. Provision services (Postgres, NATS — if [services] configured)
+│     ├─ 4e. Run pre_start hook (if configured; abort on failure)
+│     ├─ 4f. Start new instance on random port (with injected service env vars)
+│     ├─ 4g. Run health check (retry up to 30 times, 1s apart)
 │     │
 │     ├─ On health check success:
-│     │   ├─ 4g. Update proxy routing (domain → new port)
-│     │   ├─ 4h. Update current symlink → new release
-│     │   ├─ 4i. Drain old instance (wait drain_seconds)
-│     │   ├─ 4j. Stop old instance
-│     │   ├─ 4k. Run post_deploy hook (if configured; log-only on failure)
-│     │   └─ 4l. Clean up old releases (keep last 5)
+│     │   ├─ 4h. Update proxy routing (domain → new port)
+│     │   ├─ 4i. Update current symlink → new release
+│     │   ├─ 4j. Drain old instance (wait drain_seconds)
+│     │   ├─ 4k. Stop old instance
+│     │   ├─ 4l. Run post_deploy hook (if configured; log-only on failure)
+│     │   └─ 4m. Clean up old releases (keep last 5)
 │     │
 │     └─ On health check failure:
 │         ├─ Kill new instance
@@ -147,6 +148,38 @@ vela rollback my-app
 ```
 
 This reactivates the previous release directory, restarts the process, and swaps the proxy. Same health check flow applies.
+
+## Remote Build Deploy
+
+When `[build] remote = true` is set in your `Vela.toml`, the deploy flow changes:
+
+```
+vela deploy
+│
+├─ 1. Read Vela.toml (no artifact argument needed)
+│
+├─ 2. Upload source via git archive
+│     git archive HEAD → tarball → scp to server
+│
+├─ 3. Build on server (ssh)
+│     Extract source → run build command with build env vars
+│
+├─ 4. Package build output
+│     tar the build directory → move to deploy location
+│
+└─ 5. Activate (same as steps 4a-4m above)
+```
+
+Only committed files are uploaded. Build artifacts (node_modules, target/) are excluded automatically by `git archive`.
+
+## Service Provisioning
+
+When `[services]` is configured in your `Vela.toml`, Vela provisions services before starting your app:
+
+- **Postgres**: Installed via apt, databases and users created with generated passwords. `DATABASE_URL` injected.
+- **NATS**: Binary downloaded, config generated, started as a supervised process. `NATS_URL` injected.
+
+Services are provisioned once and reused across deploys. Credentials are persisted in `/var/vela/services/`.
 
 ## What Your App Needs
 

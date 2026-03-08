@@ -127,6 +127,17 @@ post_deploy = "bin/notify"   # runs after traffic swap; failure is logged only
 [env]
 DATABASE_PATH = "${data_dir}/my-app.db"
 SECRET_KEY_BASE = "${secret:SECRET_KEY_BASE}"
+
+[services.postgres]
+version = "17"
+databases = ["my_app_prod"]
+
+# [services.nats]
+# jetstream = true
+
+# [build]
+# remote = true
+# command = "cargo build --release"
 ```
 
 ## Commands
@@ -143,6 +154,7 @@ SECRET_KEY_BASE = "${secret:SECRET_KEY_BASE}"
 | `vela secret set <app> KEY=VALUE` | Set a secret |
 | `vela secret list <app>` | List secret keys |
 | `vela secret remove <app> KEY` | Remove a secret |
+| `vela backup` | Trigger a manual backup |
 | `vela apps` | List apps (server-side) |
 
 ## Deploy Strategies
@@ -164,8 +176,8 @@ SECRET_KEY_BASE = "${secret:SECRET_KEY_BASE}"
 - [Production Checklist](docs/production-checklist.md) — pre-flight checks, troubleshooting, ACME staging workflow
 - [Configuration](docs/configuration.md) — Vela.toml and server.toml reference
 - [Deploy Lifecycle](docs/deploy-lifecycle.md) — what happens during a deploy
-- [Architecture](docs/architecture.md) — system design and internals
-- [Elixir/Phoenix Guide](docs/elixir-phoenix.md) — deploying BEAM releases
+- [Architecture](docs/architecture.md) — system design, services, and internals
+- [Elixir/Phoenix Guide](docs/elixir-phoenix.md) — deploying BEAM releases with services and remote builds
 - [Cloudflare Integration](docs/cloudflare.md) — using Cloudflare with Vela
 
 ## Status
@@ -197,13 +209,14 @@ All core functionality is built, tested, and working:
 - [x] HTTP → HTTPS redirect (with ACME challenge passthrough)
 - [x] ACME certificate auto-renewal (checks daily, renews at 30 days before expiry)
 
+- [x] Service dependencies: Postgres lifecycle management (install, provision, DATABASE_URL injection)
+- [x] Service dependencies: NATS lifecycle management (download, supervise, NATS_URL injection)
+- [x] Service dependencies framework (ServiceManager with per-service state persistence)
+- [x] Scheduled backups (app data, secrets, pg_dump — local or S3)
+- [x] Remote build support (git archive upload, build on server)
+
 Coming next:
 
-- [ ] Service dependencies: Postgres lifecycle management ([#3](https://github.com/raskell-io/vela/issues/3))
-- [ ] Service dependencies: NATS lifecycle management ([#4](https://github.com/raskell-io/vela/issues/4))
-- [ ] Service dependencies: generic framework ([#5](https://github.com/raskell-io/vela/issues/5))
-- [ ] Built-in scheduled backups ([#7](https://github.com/raskell-io/vela/issues/7))
-- [ ] Remote build support ([#10](https://github.com/raskell-io/vela/issues/10))
 - [ ] Process isolation (Linux namespaces, cgroups v2)
 - [ ] Resource limits (memory, CPU weight)
 

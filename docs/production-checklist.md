@@ -193,6 +193,40 @@ vela secret set your-app DATABASE_URL=postgres://...
 vela rollback your-app
 ```
 
+## Backups
+
+Set up scheduled backups to protect against data loss:
+
+```bash
+# Add to /etc/vela/server.toml on your server
+cat >> /etc/vela/server.toml <<'EOF'
+
+[backup]
+schedule = "daily"
+retain = 7
+destination = "/var/backups/vela"
+
+[backup.include]
+app_data = true
+secrets = true
+postgres = true
+EOF
+```
+
+Restart the daemon to pick up the new config:
+
+```bash
+sudo systemctl restart vela
+```
+
+For S3 backups, set `destination = "s3://your-bucket/vela-backups"` and ensure the AWS CLI is installed and configured.
+
+Trigger a manual backup anytime:
+
+```bash
+vela backup
+```
+
 ## Troubleshooting
 
 ### "failed to connect to vela daemon"

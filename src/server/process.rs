@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tokio::process::{Child, Command};
 
@@ -28,8 +28,19 @@ pub struct AppProcess {
     pub release_id: String,
     pub port: u16,
     pub child: Child,
+    pub started_at: SystemTime,
     /// Stored so we can restart the process on crash.
     pub launch_config: LaunchConfig,
+}
+
+/// Summary info for a running app process (no ownership of the child).
+#[derive(Debug, Clone)]
+pub struct AppProcessInfo {
+    pub app_name: String,
+    pub release_id: String,
+    pub port: u16,
+    pub pid: Option<u32>,
+    pub started_at: SystemTime,
 }
 
 /// Everything needed to (re)start an app process.
@@ -168,6 +179,7 @@ impl ProcessManager {
                 .to_string(),
             port,
             child,
+            started_at: SystemTime::now(),
             launch_config: LaunchConfig {
                 release_dir: release_dir.to_path_buf(),
                 binary_name: binary_name.to_string(),
@@ -260,6 +272,21 @@ impl ProcessManager {
             .iter()
             .filter(|(k, _)| !k.contains(":pending"))
             .map(|(_, p)| (p.app_name.as_str(), p.port))
+            .collect()
+    }
+
+    /// List all active apps with detailed process info.
+    pub fn list_active_details(&self) -> Vec<AppProcessInfo> {
+        self.running
+            .iter()
+            .filter(|(k, _)| !k.contains(":pending"))
+            .map(|(_, p)| AppProcessInfo {
+                app_name: p.app_name.clone(),
+                release_id: p.release_id.clone(),
+                port: p.port,
+                pid: p.child.id(),
+                started_at: p.started_at,
+            })
             .collect()
     }
 

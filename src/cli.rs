@@ -89,6 +89,10 @@ pub struct AppsArgs {
     /// Show detailed info
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Output as JSON (queries running daemon for live process info)
+    #[arg(long)]
+    pub json: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +133,10 @@ pub struct StatusArgs {
     /// Path to Vela.toml (to infer server)
     #[arg(short, long, default_value = "Vela.toml")]
     pub manifest: PathBuf,
+
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(clap::Args)]

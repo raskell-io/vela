@@ -11,7 +11,8 @@ use tokio::sync::Mutex;
 use super::process::ProcessManager;
 use super::proxy::RouteTable;
 use super::service::ServiceManager;
-use crate::config::{AppType, DeployStrategy};
+use super::state::ServerState;
+use crate::config::{AppType, DeployStrategy, ServerConfig};
 use crate::health::HealthCheck;
 
 /// Shared parameters for deploy operations.
@@ -49,6 +50,8 @@ pub enum DaemonRequest {
     },
     #[serde(rename = "stop")]
     Stop { app: String, domain: String },
+    #[serde(rename = "status")]
+    Status,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -56,6 +59,20 @@ pub struct DaemonResponse {
     pub success: bool,
     pub message: String,
     pub port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps: Option<Vec<AppStatusEntry>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AppStatusEntry {
+    pub name: String,
+    pub domain: String,
+    pub release: String,
+    pub strategy: String,
+    pub pid: Option<u32>,
+    pub port: u16,
+    pub uptime_seconds: u64,
+    pub health: String,
 }
 
 /// Start the IPC server on a Unix domain socket.
@@ -64,6 +81,7 @@ pub async fn start_ipc_server(
     process_manager: Arc<Mutex<ProcessManager>>,
     route_table: RouteTable,
     service_manager: Arc<Mutex<ServiceManager>>,
+    data_dir: PathBuf,
 ) -> Result<()> {
     // Remove stale socket from a previous run
     let _ = std::fs::remove_file(sock_path);
@@ -89,9 +107,10 @@ pub async fn start_ipc_server(
         let pm = process_manager.clone();
         let rt = route_table.clone();
         let sm = service_manager.clone();
+        let dd = data_dir.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, pm, rt, sm).await {
+            if let Err(e) = handle_connection(stream, pm, rt, sm, dd).await {
                 tracing::error!(err = %e, "IPC connection error");
             }
         });
@@ -103,6 +122,7 @@ async fn handle_connection(
     process_manager: Arc<Mutex<ProcessManager>>,
     route_table: RouteTable,
     service_manager: Arc<Mutex<ServiceManager>>,
+    data_dir: PathBuf,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -144,6 +164,7 @@ async fn handle_connection(
                                 success: false,
                                 message: format!("failed to provision service {svc_type}: {e}"),
                                 port: None,
+                                apps: None,
                             });
                             break;
                         }
@@ -188,6 +209,9 @@ async fn handle_connection(
         }
         DaemonRequest::Stop { app, domain } => {
             handle_stop(&process_manager, &route_table, &app, &domain).await
+        }
+        DaemonRequest::Status => {
+            handle_status(&process_manager, &data_dir).await
         }
     };
 
@@ -259,6 +283,7 @@ async fn deploy_blue_green(params: &DeployParams<'_>) -> DaemonResponse {
                     success: false,
                     message: format!("failed to start app: {e}"),
                     port: None,
+                    apps: None,
                 };
             }
         }
@@ -298,6 +323,7 @@ async fn deploy_blue_green(params: &DeployParams<'_>) -> DaemonResponse {
         success: true,
         message: format!("deployed {app} on port {port}"),
         port: Some(port),
+        apps: None,
     }
 }
 
@@ -342,6 +368,7 @@ async fn deploy_sequential(params: &DeployParams<'_>) -> DaemonResponse {
                     success: false,
                     message: format!("failed to start app: {e}"),
                     port: None,
+                    apps: None,
                 };
             }
         }
@@ -379,6 +406,7 @@ async fn deploy_sequential(params: &DeployParams<'_>) -> DaemonResponse {
         success: true,
         message: format!("deployed {app} on port {port}"),
         port: Some(port),
+        apps: None,
     }
 }
 
@@ -405,6 +433,7 @@ async fn run_health_check(
                     success: false,
                     message: format!("health check failed: {e}"),
                     port: None,
+                    apps: None,
                 })
             }
         }
@@ -428,12 +457,96 @@ async fn handle_stop(
             success: true,
             message: format!("stopped {app}"),
             port: None,
+            apps: None,
         },
         Err(e) => DaemonResponse {
             success: false,
             message: format!("failed to stop {app}: {e}"),
             port: None,
+            apps: None,
         },
+    }
+}
+
+async fn handle_status(
+    process_manager: &Arc<Mutex<ProcessManager>>,
+    data_dir: &Path,
+) -> DaemonResponse {
+    let pm = process_manager.lock().await;
+    let active = pm.list_active_details();
+    drop(pm);
+
+    let config = ServerConfig {
+        data_dir: data_dir.to_path_buf(),
+        ..Default::default()
+    };
+    let state = match ServerState::open(&config) {
+        Ok(s) => s,
+        Err(e) => {
+            return DaemonResponse {
+                success: false,
+                message: format!("failed to read server state: {e}"),
+                port: None,
+                apps: None,
+            };
+        }
+    };
+
+    let mut entries = Vec::new();
+    for proc_info in &active {
+        let (domain, strategy, health_path) =
+            match state.get_app(&proc_info.app_name) {
+                Ok(Some(app)) => (
+                    app.domain,
+                    app.deploy_strategy,
+                    app.health_path,
+                ),
+                _ => (String::new(), "blue-green".into(), None),
+            };
+
+        let health = probe_health(proc_info.port, health_path.as_deref()).await;
+        let uptime = std::time::SystemTime::now()
+            .duration_since(proc_info.started_at)
+            .unwrap_or_default()
+            .as_secs();
+
+        entries.push(AppStatusEntry {
+            name: proc_info.app_name.clone(),
+            domain,
+            release: proc_info.release_id.clone(),
+            strategy,
+            pid: proc_info.pid,
+            port: proc_info.port,
+            uptime_seconds: uptime,
+            health,
+        });
+    }
+
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+
+    DaemonResponse {
+        success: true,
+        message: format!("{} app(s) running", entries.len()),
+        port: None,
+        apps: Some(entries),
+    }
+}
+
+/// Quick single-probe health check for status queries.
+async fn probe_health(port: u16, health_path: Option<&str>) -> String {
+    let Some(path) = health_path else {
+        return "unknown".to_string();
+    };
+    let url = format!("http://127.0.0.1:{port}{path}");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build();
+    match client {
+        Ok(c) => match c.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => "healthy".to_string(),
+            _ => "unhealthy".to_string(),
+        },
+        Err(_) => "unhealthy".to_string(),
     }
 }
 
@@ -537,10 +650,56 @@ mod tests {
             success: true,
             message: "deployed myapp on port 10001".into(),
             port: Some(10001),
+            apps: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: DaemonResponse = serde_json::from_str(&json).unwrap();
         assert!(parsed.success);
         assert_eq!(parsed.port, Some(10001));
+    }
+
+    #[test]
+    fn serialize_status_request() {
+        let req = DaemonRequest::Status;
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("status"));
+        let parsed: DaemonRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, DaemonRequest::Status));
+    }
+
+    #[test]
+    fn serialize_status_response() {
+        let resp = DaemonResponse {
+            success: true,
+            message: "2 app(s) running".into(),
+            port: None,
+            apps: Some(vec![AppStatusEntry {
+                name: "cyanea".into(),
+                domain: "cyanea.bio".into(),
+                release: "20260305-001".into(),
+                strategy: "sequential".into(),
+                pid: Some(12345),
+                port: 10001,
+                uptime_seconds: 3600,
+                health: "healthy".into(),
+            }]),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("cyanea"));
+        assert!(json.contains("12345"));
+        let parsed: DaemonResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.apps.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn response_without_apps_omits_field() {
+        let resp = DaemonResponse {
+            success: true,
+            message: "deployed".into(),
+            port: Some(10001),
+            apps: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("apps"));
     }
 }

@@ -131,8 +131,11 @@ pub fn run(args: ServeArgs) -> Result<()> {
         let ipc_rt = route_table.clone();
         let ipc_sm = service_manager.clone();
         let ipc_sock = sock_path.clone();
+        let ipc_data_dir = config.data_dir.clone();
         tokio::spawn(async move {
-            if let Err(e) = ipc::start_ipc_server(&ipc_sock, ipc_pm, ipc_rt, ipc_sm).await {
+            if let Err(e) =
+                ipc::start_ipc_server(&ipc_sock, ipc_pm, ipc_rt, ipc_sm, ipc_data_dir).await
+            {
                 tracing::error!(err = %e, "IPC server exited with error");
             }
         });
@@ -317,6 +320,10 @@ async fn restore_apps(
 
 /// List apps (server-side CLI command).
 pub fn apps(args: AppsArgs) -> Result<()> {
+    if args.json || args.verbose {
+        return apps_live(args.json);
+    }
+
     let config = ServerConfig::default();
     let state = state::ServerState::open(&config)?;
     let apps = state.list_apps()?;
@@ -326,23 +333,97 @@ pub fn apps(args: AppsArgs) -> Result<()> {
         return Ok(());
     }
 
-    if args.verbose {
-        println!("{:<20} {:<30} {:<20} STATUS", "NAME", "DOMAIN", "RELEASE");
-        println!("{}", "-".repeat(85));
-    }
-
     for app in &apps {
-        if args.verbose {
-            println!(
-                "{:<20} {:<30} {:<20} {}",
-                app.name, app.domain, app.current_release, app.status
-            );
-        } else {
-            println!("{:<20} {}", app.name, app.domain);
-        }
+        println!("{:<20} {}", app.name, app.domain);
     }
 
     Ok(())
+}
+
+/// Query the daemon for live process info and output as JSON or human-readable.
+fn apps_live(json: bool) -> Result<()> {
+    let config = ServerConfig::default();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+
+    rt.block_on(async {
+        let sock_path = config.socket_path();
+        let response = ipc::send_command(&sock_path, &ipc::DaemonRequest::Status).await?;
+
+        if !response.success {
+            anyhow::bail!("status query failed: {}", response.message);
+        }
+
+        let apps = response.apps.unwrap_or_default();
+
+        if json {
+            let output = serde_json::to_string_pretty(&apps)?;
+            println!("{output}");
+        } else {
+            if apps.is_empty() {
+                println!("no apps running");
+                return Ok(());
+            }
+
+            let version = env!("CARGO_PKG_VERSION");
+            println!("vela {version} — active, {} app(s)\n", apps.len());
+
+            for app in &apps {
+                let health_display = match app.health.as_str() {
+                    "healthy" => "healthy (HTTP 200)",
+                    "unhealthy" => "unhealthy",
+                    _ => "no health check",
+                };
+                let uptime = format_uptime(app.uptime_seconds);
+                let pid = app.pid.map_or("-".to_string(), |p| format!("pid {p}"));
+                println!(
+                    "  {:<16} {:<24} {:<22} {:<12} up {}",
+                    app.name, app.domain, health_display, pid, uptime
+                );
+            }
+        }
+
+        Ok(())
+    })
+}
+
+fn format_uptime(seconds: u64) -> String {
+    let days = seconds / 86400;
+    let hours = (seconds % 86400) / 3600;
+    let mins = (seconds % 3600) / 60;
+
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {mins}m")
+    } else {
+        format!("{mins}m")
+    }
+}
+
+fn apps_json() -> Result<()> {
+    let config = ServerConfig::default();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+
+    rt.block_on(async {
+        let sock_path = config.socket_path();
+        let response = ipc::send_command(&sock_path, &ipc::DaemonRequest::Status).await?;
+
+        if response.success {
+            let apps = response.apps.unwrap_or_default();
+            let json = serde_json::to_string_pretty(&apps)?;
+            println!("{json}");
+        } else {
+            anyhow::bail!("status query failed: {}", response.message);
+        }
+
+        Ok(())
+    })
 }
 
 /// Internal deploy command — called by the client over SSH.

@@ -122,7 +122,11 @@ fn deploy_remote_build(
 
 pub fn status(args: StatusArgs) -> Result<()> {
     let server = resolve_server(args.server, &args.manifest)?;
-    ssh::run_remote(&server, &["vela", "apps", "--verbose"])?;
+    if args.json {
+        ssh::run_remote(&server, &["vela", "apps", "--json"])?;
+    } else {
+        ssh::run_remote(&server, &["vela", "apps", "--verbose"])?;
+    }
     Ok(())
 }
 

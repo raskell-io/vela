@@ -72,7 +72,17 @@ Two modes:
 - **ACME (Let's Encrypt)** — Set `acme_email` in server.toml. Vela provisions certs on first request and renews them automatically when they're within 30 days of expiry. HTTP-01 challenge validation on port 80.
 - **Static certs** — Set `cert` and `key` paths in server.toml. Use with Cloudflare Origin Certificates or any custom cert.
 
+Optionally, `client_ca` turns on mutual TLS: clients must present a certificate signed by that CA or the handshake fails. This is meant for Cloudflare Authenticated Origin Pulls.
+
 HTTP requests are automatically redirected to HTTPS (301) when TLS is configured, except for `/.well-known/acme-challenge/` paths needed for ACME validation.
+
+### WebSockets
+
+WebSocket upgrade requests are forwarded to the app. After the app answers with `101 Switching Protocols`, the proxy tunnels bytes in both directions between client and app until either side closes. Phoenix LiveView and channels work without extra configuration.
+
+### Redirects
+
+The proxy never follows upstream redirects. A `302` from your app, including its `Set-Cookie` headers, reaches the browser unchanged.
 
 ## IPC Architecture
 

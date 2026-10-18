@@ -44,7 +44,7 @@ Vela uploads your binary (or BEAM release), starts it on a fresh port, runs a he
 ```
 
 - **One binary** — same `vela` runs on server and laptop
-- **Embedded proxy** — hyper-based reverse proxy with auto-TLS via Let's Encrypt (with auto-renewal)
+- **Embedded proxy** — hyper-based reverse proxy with auto-TLS via Let's Encrypt (with auto-renewal), WebSocket passthrough, and optional mTLS
 - **SSH is the control plane** — no tokens, no API keys, no custom auth
 - **SQLite-aware** — persistent data directories survive deploys; sequential strategy avoids write contention
 - **Rust and Elixir** — deploy compiled binaries or BEAM releases
@@ -147,7 +147,7 @@ databases = ["my_app_prod"]
 | `vela serve` | Start the server daemon (Linux) |
 | `vela setup` | Generate and install systemd service |
 | `vela init` | Generate a Vela.toml |
-| `vela deploy <artifact>` | Deploy an app |
+| `vela deploy [<artifact>]` | Deploy an app (no artifact needed with `[build] remote = true`) |
 | `vela status [--json]` | Show running apps (with live health, PID, uptime) |
 | `vela logs <app> [-f]` | Tail app logs |
 | `vela rollback [<app>]` | Roll back to previous release |
@@ -208,13 +208,14 @@ All core functionality is built, tested, and working:
 - [x] Deploy hooks (`pre_start` and `post_deploy`)
 - [x] HTTP → HTTPS redirect (with ACME challenge passthrough)
 - [x] ACME certificate auto-renewal (checks daily, renews at 30 days before expiry)
-
 - [x] Service dependencies: Postgres lifecycle management (install, provision, DATABASE_URL injection)
 - [x] Service dependencies: NATS lifecycle management (download, supervise, NATS_URL injection)
 - [x] Service dependencies framework (ServiceManager with per-service state persistence)
 - [x] Scheduled backups (app data, secrets, pg_dump — local or S3)
 - [x] Remote build support (git archive upload, build on server)
 - [x] Machine-readable status (`vela status --json` with live health probes, PID, uptime)
+- [x] WebSocket proxying (upgrade passthrough, bidirectional tunnel)
+- [x] mTLS client verification (`client_ca`, e.g. Cloudflare Authenticated Origin Pulls)
 
 Coming next:
 

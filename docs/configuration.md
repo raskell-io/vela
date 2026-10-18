@@ -77,7 +77,12 @@ https_port = 443          # HTTPS listener port (default: 443)
 [tls]
 acme_email = "ops@example.com"   # Email for Let's Encrypt registration
 staging = false                   # Use LE staging environment (for testing)
+# cert = "/etc/vela/tls/origin.pem"       # Static cert instead of ACME
+# key = "/etc/vela/tls/origin-key.pem"
+# client_ca = "/etc/vela/tls/client-ca.pem" # Require client certs signed by this CA (mTLS)
 ```
+
+When `client_ca` is set, the HTTPS listener rejects any connection that doesn't present a client certificate signed by that CA. Use it for [Cloudflare Authenticated Origin Pulls](cloudflare.md#authenticated-origin-pulls-mtls) so only Cloudflare can reach your origin.
 
 ### Config Path
 

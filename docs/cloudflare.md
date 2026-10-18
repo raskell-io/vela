@@ -63,6 +63,30 @@ key = "/etc/vela/tls/origin-key.pem"
 
 No `acme_email` needed. Cloudflare handles public-facing TLS certificates.
 
+#### Authenticated Origin Pulls (mTLS)
+
+The origin certificate proves your server to Cloudflare. Authenticated Origin Pulls does the reverse: Cloudflare presents a client certificate, and Vela rejects any TLS connection without one. Requests that bypass Cloudflare fail at the handshake.
+
+1. Download Cloudflare's origin-pull CA:
+
+   ```bash
+   curl -o /etc/vela/tls/cloudflare-origin-pull-ca.pem \
+     https://developers.cloudflare.com/ssl/static/authenticated_origin_pull_ca.pem
+   ```
+
+2. In Cloudflare, enable **SSL/TLS** → **Origin Server** → **Authenticated Origin Pulls**. Cloudflare starts sending its client certificate; Vela ignores it until the next step.
+
+3. Add the CA to server.toml and restart Vela (`systemctl restart vela`):
+
+   ```toml
+   [tls]
+   cert = "/etc/vela/tls/origin.pem"
+   key = "/etc/vela/tls/origin-key.pem"
+   client_ca = "/etc/vela/tls/cloudflare-origin-pull-ca.pem"
+   ```
+
+Keep this order. If Vela requires client certificates before Cloudflare sends them, every request fails. The firewall rules below are still worth having.
+
 ### 4. Firewall
 
 Since Cloudflare proxies all traffic, lock your server so only Cloudflare can reach ports 80 and 443. This prevents anyone from bypassing Cloudflare and hitting your server directly.

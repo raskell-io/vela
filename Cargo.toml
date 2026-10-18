@@ -22,16 +22,15 @@ hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 tokio-rustls = "0.26"
-rustls-pemfile = "2"
 
 # HTTP client (for health checks and proxy forwarding)
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 # ACME (Let's Encrypt)
 instant-acme = "0.8"
 rcgen = "0.14"
 base64 = "0.22"
-x509-parser = "0.17"
+x509-parser = "0.18"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -51,7 +50,7 @@ anyhow = "1"
 
 # Linux isolation (server-only, compiled on all platforms for now)
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.30", features = ["process", "mount", "sched", "signal", "user"] }
+nix = { version = "0.31", features = ["process", "mount", "sched", "signal", "user"] }
 
 [dev-dependencies]
 tempfile = "3"

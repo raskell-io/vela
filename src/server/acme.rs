@@ -4,6 +4,8 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use tokio_rustls::rustls;
+use tokio_rustls::rustls::pki_types::pem::PemObject;
+use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 /// Stores ACME HTTP-01 challenge tokens for the proxy to serve.
 #[derive(Debug, Clone, Default)]
@@ -79,14 +81,14 @@ pub fn domains_needing_certs(data_dir: &Path, domains: &[String]) -> Vec<String>
 
 /// Check if a PEM certificate expires within `days` days.
 fn cert_expires_soon(cert_path: &Path, days: u32) -> bool {
-    use rustls_pemfile::certs;
-
     let data = match std::fs::read(cert_path) {
         Ok(d) => d,
         Err(_) => return true,
     };
 
-    let certs: Vec<_> = certs(&mut &data[..]).filter_map(|r| r.ok()).collect();
+    let certs: Vec<_> = CertificateDer::pem_slice_iter(&data)
+        .filter_map(|r| r.ok())
+        .collect();
     let cert = match certs.first() {
         Some(c) => c,
         None => return true,
@@ -307,13 +309,11 @@ impl CertResolver {
         let key_pem = std::fs::read(key_path)
             .with_context(|| format!("failed to read key: {}", key_path.display()))?;
 
-        let certs: Vec<_> = rustls_pemfile::certs(&mut &cert_pem[..])
+        let certs: Vec<_> = CertificateDer::pem_slice_iter(&cert_pem)
             .collect::<std::result::Result<Vec<_>, _>>()
             .context("failed to parse certificates")?;
 
-        let key = rustls_pemfile::private_key(&mut &key_pem[..])
-            .context("failed to parse private key")?
-            .context("no private key found")?;
+        let key = PrivateKeyDer::from_pem_slice(&key_pem).context("failed to parse private key")?;
 
         let signing_key = rustls::crypto::aws_lc_rs::sign::any_supported_type(&key)
             .map_err(|e| anyhow::anyhow!("unsupported key type: {e}"))?;

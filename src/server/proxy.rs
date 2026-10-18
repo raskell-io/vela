@@ -611,10 +611,10 @@ async fn forward_request(
 fn load_certs(
     path: &std::path::Path,
 ) -> anyhow::Result<Vec<tokio_rustls::rustls::pki_types::CertificateDer<'static>>> {
-    let cert_file = std::fs::File::open(path)
-        .map_err(|e| anyhow::anyhow!("failed to open cert {}: {e}", path.display()))?;
-    let mut reader = std::io::BufReader::new(cert_file);
-    let certs = rustls_pemfile::certs(&mut reader)
+    use tokio_rustls::rustls::pki_types::pem::PemObject;
+
+    let certs = tokio_rustls::rustls::pki_types::CertificateDer::pem_file_iter(path)
+        .map_err(|e| anyhow::anyhow!("failed to open cert {}: {e}", path.display()))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| anyhow::anyhow!("failed to parse cert: {e}"))?;
     Ok(certs)
@@ -649,12 +649,17 @@ fn build_client_verifier(
 fn load_private_key(
     path: &std::path::Path,
 ) -> anyhow::Result<tokio_rustls::rustls::pki_types::PrivateKeyDer<'static>> {
-    let key_file = std::fs::File::open(path)
-        .map_err(|e| anyhow::anyhow!("failed to open key {}: {e}", path.display()))?;
-    let mut reader = std::io::BufReader::new(key_file);
-    let key = rustls_pemfile::private_key(&mut reader)
-        .map_err(|e| anyhow::anyhow!("failed to parse key: {e}"))?
-        .ok_or_else(|| anyhow::anyhow!("no private key found in {}", path.display()))?;
+    use tokio_rustls::rustls::pki_types::pem::{self, PemObject};
+
+    let key =
+        tokio_rustls::rustls::pki_types::PrivateKeyDer::from_pem_file(path).map_err(
+            |e| match e {
+                pem::Error::NoItemsFound => {
+                    anyhow::anyhow!("no private key found in {}", path.display())
+                }
+                e => anyhow::anyhow!("failed to parse key {}: {e}", path.display()),
+            },
+        )?;
     Ok(key)
 }
 

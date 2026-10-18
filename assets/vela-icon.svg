@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Vela">
+  <rect width="256" height="256" rx="56" fill="#0F172A"/>
+  <!-- mainsail -->
+  <path d="M136 36 C174 78 198 128 204 172 L136 172 Z" fill="#F8FAFC"/>
+  <!-- jib -->
+  <path d="M122 60 L122 172 L60 172 C74 132 94 94 122 60 Z" fill="#2DD4BF"/>
+  <!-- hull -->
+  <path d="M48 186 H208 L192 210 Q190 214 185 214 H71 Q66 214 64 210 Z" fill="#F8FAFC"/>
+</svg>

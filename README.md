@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/vela-icon.svg" width="128" height="128" alt="Vela">
+</p>
+
 # Vela
 
 No-downtime app deployment on bare metal. One binary. No containers. No bullshit.

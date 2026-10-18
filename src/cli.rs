@@ -112,8 +112,8 @@ pub struct InitArgs {
 
 #[derive(clap::Args)]
 pub struct DeployArgs {
-    /// Path to the artifact (binary, directory, or tarball)
-    pub artifact: PathBuf,
+    /// Path to the artifact (binary, directory, or tarball). Not needed with [build] remote = true.
+    pub artifact: Option<PathBuf>,
 
     /// Path to Vela.toml (defaults to ./Vela.toml)
     #[arg(short, long, default_value = "Vela.toml")]

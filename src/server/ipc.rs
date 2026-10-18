@@ -210,9 +210,7 @@ async fn handle_connection(
         DaemonRequest::Stop { app, domain } => {
             handle_stop(&process_manager, &route_table, &app, &domain).await
         }
-        DaemonRequest::Status => {
-            handle_status(&process_manager, &data_dir).await
-        }
+        DaemonRequest::Status => handle_status(&process_manager, &data_dir).await,
     };
 
     let resp_json = serde_json::to_string(&response)?;
@@ -494,15 +492,10 @@ async fn handle_status(
 
     let mut entries = Vec::new();
     for proc_info in &active {
-        let (domain, strategy, health_path) =
-            match state.get_app(&proc_info.app_name) {
-                Ok(Some(app)) => (
-                    app.domain,
-                    app.deploy_strategy,
-                    app.health_path,
-                ),
-                _ => (String::new(), "blue-green".into(), None),
-            };
+        let (domain, strategy, health_path) = match state.get_app(&proc_info.app_name) {
+            Ok(Some(app)) => (app.domain, app.deploy_strategy, app.health_path),
+            _ => (String::new(), "blue-green".into(), None),
+        };
 
         let health = probe_health(proc_info.port, health_path.as_deref()).await;
         let uptime = std::time::SystemTime::now()

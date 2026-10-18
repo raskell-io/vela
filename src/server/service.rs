@@ -174,7 +174,8 @@ impl ServiceManager {
                     if let Some(state) = state {
                         // Inject DATABASE_URL for each database
                         for db_name in &pg_config.databases {
-                            let password = state.credentials.get(db_name).cloned().unwrap_or_default();
+                            let password =
+                                state.credentials.get(db_name).cloned().unwrap_or_default();
                             let user = db_name;
                             let url = format!("postgres://{user}:{password}@localhost/{db_name}");
                             vars.push(("DATABASE_URL".to_string(), url));
@@ -362,21 +363,15 @@ fn install_postgres(version: &str) -> Result<()> {
 
 fn provision_postgres_db(db_name: &str, password: &str) -> Result<()> {
     // Create user (ignore error if exists)
-    let create_user = format!(
-        "CREATE USER \"{db_name}\" WITH PASSWORD '{password}';",
-    );
+    let create_user = format!("CREATE USER \"{db_name}\" WITH PASSWORD '{password}';",);
     let _ = run_cmd_as_postgres(&create_user);
 
     // Create database
-    let create_db = format!(
-        "CREATE DATABASE \"{db_name}\" OWNER \"{db_name}\";",
-    );
+    let create_db = format!("CREATE DATABASE \"{db_name}\" OWNER \"{db_name}\";",);
     let _ = run_cmd_as_postgres(&create_db);
 
     // Grant privileges
-    let grant = format!(
-        "GRANT ALL PRIVILEGES ON DATABASE \"{db_name}\" TO \"{db_name}\";",
-    );
+    let grant = format!("GRANT ALL PRIVILEGES ON DATABASE \"{db_name}\" TO \"{db_name}\";",);
     let _ = run_cmd_as_postgres(&grant);
 
     Ok(())
@@ -396,10 +391,7 @@ fn run_cmd_as_postgres(sql: &str) -> Result<()> {
 }
 
 /// Back up Postgres databases via pg_dump.
-pub fn backup_postgres_databases(
-    services_dir: &Path,
-    dest_dir: &Path,
-) -> Result<Vec<PathBuf>> {
+pub fn backup_postgres_databases(services_dir: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
     let state_path = services_dir.join("postgres").join("state.toml");
     if !state_path.exists() {
         return Ok(Vec::new());
@@ -442,9 +434,8 @@ fn download_nats(version: &str, nats_dir: &Path) -> Result<()> {
     };
 
     let tarball = format!("nats-server-v{version}-linux-{arch}.tar.gz");
-    let url = format!(
-        "https://github.com/nats-io/nats-server/releases/download/v{version}/{tarball}"
-    );
+    let url =
+        format!("https://github.com/nats-io/nats-server/releases/download/v{version}/{tarball}");
 
     let download_path = nats_dir.join(&tarball);
 
@@ -546,8 +537,8 @@ fn generate_password() -> Result<String> {
 fn load_service_state(path: &Path) -> Result<ServiceState> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    let state: ServiceState = toml::from_str(&content)
-        .with_context(|| format!("failed to parse {}", path.display()))?;
+    let state: ServiceState =
+        toml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(state)
 }
 

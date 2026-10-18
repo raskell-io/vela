@@ -132,12 +132,7 @@ pub fn schedule_to_interval_secs(schedule: &str) -> u64 {
     match schedule {
         "hourly" => 3600,
         "daily" => 86400,
-        s if s.ends_with('h') => {
-            s.trim_end_matches('h')
-                .parse::<u64>()
-                .unwrap_or(24)
-                * 3600
-        }
+        s if s.ends_with('h') => s.trim_end_matches('h').parse::<u64>().unwrap_or(24) * 3600,
         _ => 86400, // default to daily
     }
 }
@@ -212,11 +207,10 @@ fn enforce_retention(destination: &str, retain: u32) -> Result<()> {
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .filter(|p| {
-                p.file_name()
-                    .is_some_and(|f| {
-                        let name = f.to_string_lossy();
-                        name.starts_with("vela-backup-") && name.ends_with(".tar.gz")
-                    })
+                p.file_name().is_some_and(|f| {
+                    let name = f.to_string_lossy();
+                    name.starts_with("vela-backup-") && name.ends_with(".tar.gz")
+                })
             })
             .collect();
 
@@ -292,7 +286,8 @@ mod tests {
         // Create 5 fake backups
         for i in 1..=5 {
             std::fs::write(
-                tmp.path().join(format!("vela-backup-2026030{i}-120000.tar.gz")),
+                tmp.path()
+                    .join(format!("vela-backup-2026030{i}-120000.tar.gz")),
                 "fake",
             )
             .unwrap();

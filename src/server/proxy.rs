@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use anyhow::Context;
+
 use super::acme::{CertResolver, ChallengeStore};
 use crate::config::ServerConfig;
 
@@ -66,8 +68,13 @@ pub fn start_proxy(
     let rt = route_table.clone();
     let cs = challenge_store.clone();
 
-    // Shared HTTP client for upstream forwarding (connection pooling)
-    let upstream_client = reqwest::Client::builder().no_proxy().build().unwrap();
+    // Shared HTTP client for upstream forwarding (connection pooling).
+    // Redirects MUST be disabled — the browser needs to see 302 + Set-Cookie.
+    let upstream_client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .context("failed to build upstream HTTP client")?;
 
     // Start HTTPS proxy if we have either static certs or a dynamic cert resolver
     let tls_config = config.tls.clone();

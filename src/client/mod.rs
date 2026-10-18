@@ -65,7 +65,10 @@ pub fn deploy(args: DeployArgs) -> Result<()> {
         return deploy_remote_build(&args.manifest, &manifest, &server, app_name, build);
     }
 
-    let artifact = &args.artifact;
+    let artifact = args
+        .artifact
+        .as_ref()
+        .context("artifact path required (or use [build] remote = true)")?;
     if !artifact.exists() {
         anyhow::bail!("artifact not found: {}", artifact.display());
     }

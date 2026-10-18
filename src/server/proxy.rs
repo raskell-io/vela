@@ -483,11 +483,11 @@ async fn handle_websocket_upgrade(
                 let mut client = TokioIo::new(upgraded);
 
                 // Forward any early upstream data to client
-                if !remaining.is_empty() {
-                    if let Err(e) = client.write_all(&remaining).await {
-                        tracing::debug!(err = %e, "websocket: failed to write remaining data");
-                        return;
-                    }
+                if !remaining.is_empty()
+                    && let Err(e) = client.write_all(&remaining).await
+                {
+                    tracing::debug!(err = %e, "websocket: failed to write remaining data");
+                    return;
                 }
 
                 match tokio::io::copy_bidirectional(&mut client, &mut upstream).await {

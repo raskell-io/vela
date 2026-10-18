@@ -117,11 +117,9 @@ impl ServiceManager {
 
         // Postgres is managed by systemd — just verify it's running
         let pg_state_path = self.services_dir.join("postgres").join("state.toml");
-        if pg_state_path.exists() {
-            if !pg_is_ready() {
-                tracing::warn!("postgres was previously provisioned but is not running");
-                let _ = run_cmd("systemctl", &["start", "postgresql"]);
-            }
+        if pg_state_path.exists() && !pg_is_ready() {
+            tracing::warn!("postgres was previously provisioned but is not running");
+            let _ = run_cmd("systemctl", &["start", "postgresql"]);
         }
 
         Ok(())
@@ -154,46 +152,6 @@ impl ServiceManager {
             let _ = child.kill().await;
             self.nats_process = None;
         }
-    }
-
-    /// Get environment variables for all services an app depends on.
-    pub fn env_vars_for_services(
-        &self,
-        services: &HashMap<String, toml::Value>,
-    ) -> Result<Vec<(String, String)>> {
-        let mut vars = Vec::new();
-
-        for (svc_type, config) in services {
-            match svc_type.as_str() {
-                "postgres" => {
-                    let pg_config: PostgresConfig = config
-                        .clone()
-                        .try_into()
-                        .context("invalid [services.postgres] config")?;
-                    let state = self.load_state("postgres")?;
-                    if let Some(state) = state {
-                        // Inject DATABASE_URL for each database
-                        for db_name in &pg_config.databases {
-                            let password =
-                                state.credentials.get(db_name).cloned().unwrap_or_default();
-                            let user = db_name;
-                            let url = format!("postgres://{user}:{password}@localhost/{db_name}");
-                            vars.push(("DATABASE_URL".to_string(), url));
-                        }
-                    }
-                }
-                "nats" => {
-                    let port = self
-                        .load_state("nats")?
-                        .and_then(|s| s.port)
-                        .unwrap_or(4222);
-                    vars.push(("NATS_URL".to_string(), format!("nats://localhost:{port}")));
-                }
-                _ => {}
-            }
-        }
-
-        Ok(vars)
     }
 
     // -----------------------------------------------------------------------
@@ -329,15 +287,6 @@ impl ServiceManager {
         self.nats_process = Some(child);
         Ok(())
     }
-
-    fn load_state(&self, service_type: &str) -> Result<Option<ServiceState>> {
-        let path = self.services_dir.join(service_type).join("state.toml");
-        if !path.exists() {
-            return Ok(None);
-        }
-        let state = load_service_state(&path)?;
-        Ok(Some(state))
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -400,7 +349,7 @@ pub fn backup_postgres_databases(services_dir: &Path, dest_dir: &Path) -> Result
     let state = load_service_state(&state_path)?;
     let mut paths = Vec::new();
 
-    for (db_name, _password) in &state.credentials {
+    for db_name in state.credentials.keys() {
         let dump_path = dest_dir.join(format!("{db_name}.sql.gz"));
         let dump_cmd = format!(
             "pg_dump -U {db_name} {db_name} | gzip > {}",

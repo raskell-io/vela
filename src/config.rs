@@ -309,10 +309,6 @@ impl ServerConfig {
     pub fn services_dir(&self) -> PathBuf {
         self.data_dir.join("services")
     }
-
-    pub fn backups_dir(&self) -> PathBuf {
-        self.data_dir.join("backups")
-    }
 }
 
 fn default_app_type() -> AppType {

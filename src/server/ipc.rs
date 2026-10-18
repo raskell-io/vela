@@ -30,6 +30,8 @@ struct DeployParams<'a> {
     domain: &'a str,
 }
 
+// One request per IPC connection, so the Deploy variant's size doesn't matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "command")]
 pub enum DaemonRequest {

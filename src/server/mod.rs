@@ -334,7 +334,10 @@ pub fn apps(args: AppsArgs) -> Result<()> {
     }
 
     for app in &apps {
-        println!("{:<20} {}", app.name, app.domain);
+        println!(
+            "{:<20} {:<30} {:<18} {}",
+            app.name, app.domain, app.current_release, app.status
+        );
     }
 
     Ok(())
@@ -401,29 +404,6 @@ fn format_uptime(seconds: u64) -> String {
     } else {
         format!("{mins}m")
     }
-}
-
-fn apps_json() -> Result<()> {
-    let config = ServerConfig::default();
-
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-
-    rt.block_on(async {
-        let sock_path = config.socket_path();
-        let response = ipc::send_command(&sock_path, &ipc::DaemonRequest::Status).await?;
-
-        if response.success {
-            let apps = response.apps.unwrap_or_default();
-            let json = serde_json::to_string_pretty(&apps)?;
-            println!("{json}");
-        } else {
-            anyhow::bail!("status query failed: {}", response.message);
-        }
-
-        Ok(())
-    })
 }
 
 /// Internal deploy command — called by the client over SSH.

@@ -124,9 +124,9 @@ fn deploy_remote_build(
 pub fn status(args: StatusArgs) -> Result<()> {
     let server = resolve_server(args.server, &args.manifest)?;
     if args.json {
-        ssh::run_remote(&server, &["vela", "apps", "--json"])?;
+        ssh::run_vela(&server, &["apps", "--json"])?;
     } else {
-        ssh::run_remote(&server, &["vela", "apps", "--verbose"])?;
+        ssh::run_vela(&server, &["apps", "--verbose"])?;
     }
     Ok(())
 }
@@ -134,11 +134,11 @@ pub fn status(args: StatusArgs) -> Result<()> {
 pub fn logs(args: LogsArgs) -> Result<()> {
     let server = resolve_server(args.server, &args.manifest)?;
     let lines = args.lines.to_string();
-    let mut cmd = vec!["vela", "_logs", &args.app, "-n", &lines];
+    let mut cmd = vec!["_logs", &args.app, "-n", &lines];
     if args.follow {
         cmd.push("-f");
     }
-    ssh::run_remote_interactive(&server, &cmd)?;
+    ssh::run_vela_interactive(&server, &cmd)?;
     Ok(())
 }
 
@@ -150,12 +150,10 @@ pub fn rollback(args: RollbackArgs) -> Result<()> {
         .context("specify app name or have a Vela.toml")?;
 
     println!("rolling back {app_name} on {server}");
-    ssh::run_remote(&server, &["vela", "_rollback", &app_name])?;
+    ssh::run_vela(&server, &["_rollback", &app_name])?;
     Ok(())
 }
 
-/// Secrets live in root-owned app directories, so `_secret` runs through the
-/// same scoped `sudo vela` path as `_deploy`.
 pub fn secret(args: SecretArgs) -> Result<()> {
     match args.action {
         SecretAction::Set {
@@ -169,7 +167,7 @@ pub fn secret(args: SecretArgs) -> Result<()> {
                 anyhow::bail!("expected KEY=VALUE, got '{pair}'");
             }
             let server = resolve_server(server, &manifest)?;
-            ssh::run_remote(&server, &["sudo", "vela", "_secret", "set", &app, &pair])?;
+            ssh::run_vela(&server, &["_secret", "set", &app, &pair])?;
         }
         SecretAction::List {
             app,
@@ -178,7 +176,7 @@ pub fn secret(args: SecretArgs) -> Result<()> {
         } => {
             check_secret_app_arg(&app)?;
             let server = resolve_server(server, &manifest)?;
-            ssh::run_remote(&server, &["sudo", "vela", "_secret", "list", &app])?;
+            ssh::run_vela(&server, &["_secret", "list", &app])?;
         }
         SecretAction::Remove {
             app,
@@ -188,7 +186,7 @@ pub fn secret(args: SecretArgs) -> Result<()> {
         } => {
             check_secret_app_arg(&app)?;
             let server = resolve_server(server, &manifest)?;
-            ssh::run_remote(&server, &["sudo", "vela", "_secret", "remove", &app, &key])?;
+            ssh::run_vela(&server, &["_secret", "remove", &app, &key])?;
         }
     }
     Ok(())
@@ -205,7 +203,7 @@ fn check_secret_app_arg(app: &str) -> Result<()> {
 pub fn backup(args: BackupArgs) -> Result<()> {
     let server = resolve_server(args.server, &args.manifest)?;
     println!("running backup on {server}");
-    ssh::run_remote(&server, &["vela", "_backup"])?;
+    ssh::run_vela(&server, &["_backup"])?;
     Ok(())
 }
 

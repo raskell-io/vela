@@ -68,17 +68,9 @@ pub fn upload(server: &str, tarball: &Path, app_name: &str) -> Result<()> {
 /// Tell the remote server to activate a deploy.
 pub fn activate(server: &str, app_name: &str, manifest_toml: &str) -> Result<()> {
     // Send the manifest content via stdin to avoid escaping issues.
-    // Use sudo so scoped sudoers (e.g. deploy user) can run vela _deploy.
     let mut child = Command::new("ssh")
-        .args([
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            server,
-            "sudo",
-            "vela",
-            "_deploy",
-            app_name,
-        ])
+        .args(["-o", "StrictHostKeyChecking=accept-new", server])
+        .args(vela_command(&["_deploy", app_name]))
         .stdin(std::process::Stdio::piped())
         .spawn()
         .context("failed to run ssh")?;
@@ -96,8 +88,32 @@ pub fn activate(server: &str, app_name: &str, manifest_toml: &str) -> Result<()>
     Ok(())
 }
 
+/// Prefix for every `vela` invocation on the server. App state, secrets,
+/// logs and the daemon's IPC socket are root-owned, so all remote commands
+/// use the same scoped `sudo vela` path (a deploy user's sudoers entry must
+/// allow `vela`).
+const REMOTE_VELA: [&str; 2] = ["sudo", "vela"];
+
+fn vela_command<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    REMOTE_VELA
+        .iter()
+        .copied()
+        .chain(args.iter().copied())
+        .collect()
+}
+
+/// Run a `vela` subcommand on the server and print its output.
+pub fn run_vela(server: &str, args: &[&str]) -> Result<()> {
+    run_remote(server, &vela_command(args))
+}
+
+/// Run a `vela` subcommand on the server with a TTY (for following logs).
+pub fn run_vela_interactive(server: &str, args: &[&str]) -> Result<()> {
+    run_remote_interactive(server, &vela_command(args))
+}
+
 /// Run a command on the remote server and print output.
-pub fn run_remote(server: &str, args: &[&str]) -> Result<()> {
+fn run_remote(server: &str, args: &[&str]) -> Result<()> {
     let status = Command::new("ssh")
         .args(["-o", "StrictHostKeyChecking=accept-new", server])
         .args(args)
@@ -153,7 +169,7 @@ pub fn upload_source(server: &str, app_name: &str) -> Result<()> {
 }
 
 /// Run a command on the remote server interactively (for log tailing, etc).
-pub fn run_remote_interactive(server: &str, args: &[&str]) -> Result<()> {
+fn run_remote_interactive(server: &str, args: &[&str]) -> Result<()> {
     let status = Command::new("ssh")
         .args(["-t", "-o", "StrictHostKeyChecking=accept-new", server])
         .args(args)
@@ -170,6 +186,14 @@ pub fn run_remote_interactive(server: &str, args: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_vela_commands_use_sudo() {
+        assert_eq!(
+            vela_command(&["_rollback", "myapp"]),
+            ["sudo", "vela", "_rollback", "myapp"]
+        );
+    }
 
     #[test]
     fn create_tarball_from_file() {

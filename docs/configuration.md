@@ -123,7 +123,7 @@ vela secret remove my-app SECRET_KEY_BASE
 
 Secrets are injected as environment variables when your app starts. Reference them in `Vela.toml` with `${secret:KEY}`.
 
-`vela secret` runs `sudo vela _secret` on the server, the same way deploys run `sudo vela _deploy`, so a non-root deploy user needs sudo rights for both. Keys must be valid environment variable names. You can set secrets before an app's first deploy as long as the app name is lowercase (letters, digits, `-`, `_`, `.`).
+Every client command (`deploy`, `status`, `logs`, `rollback`, `secret`, `backup`) runs `sudo vela …` on the server, because app state, secrets, logs and the daemon socket are root-owned. A non-root deploy user needs a sudoers entry that allows `vela`, for example `deploy ALL=(root) NOPASSWD: /usr/local/bin/vela`. Keys must be valid environment variable names. You can set secrets before an app's first deploy as long as the app name is lowercase (letters, digits, `-`, `_`, `.`).
 
 ## Status and Monitoring
 

@@ -12,6 +12,7 @@ use super::acme::CertRequests;
 use super::process::ProcessManager;
 use super::proxy::RouteTable;
 use super::service::ServiceManager;
+use super::sidecar::SidecarStatus;
 use super::state::ServerState;
 use crate::config::{AppType, DeployStrategy, ServerConfig};
 use crate::health::HealthCheck;
@@ -64,6 +65,8 @@ pub struct DaemonResponse {
     pub port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apps: Option<Vec<AppStatusEntry>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services: Option<Vec<SidecarStatus>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -171,6 +174,7 @@ async fn handle_connection(
                                 message: format!("failed to provision service {svc_type}: {e}"),
                                 port: None,
                                 apps: None,
+                                services: None,
                             });
                             break;
                         }
@@ -226,7 +230,7 @@ async fn handle_connection(
         DaemonRequest::Stop { app, domain } => {
             handle_stop(&process_manager, &route_table, &app, &domain).await
         }
-        DaemonRequest::Status => handle_status(&process_manager, &data_dir).await,
+        DaemonRequest::Status => handle_status(&process_manager, &service_manager, &data_dir).await,
     };
 
     let resp_json = serde_json::to_string(&response)?;
@@ -298,6 +302,7 @@ async fn deploy_blue_green(params: &DeployParams<'_>) -> DaemonResponse {
                     message: format!("failed to start app: {e}"),
                     port: None,
                     apps: None,
+                    services: None,
                 };
             }
         }
@@ -338,6 +343,7 @@ async fn deploy_blue_green(params: &DeployParams<'_>) -> DaemonResponse {
         message: format!("deployed {app} on port {port}"),
         port: Some(port),
         apps: None,
+        services: None,
     }
 }
 
@@ -383,6 +389,7 @@ async fn deploy_sequential(params: &DeployParams<'_>) -> DaemonResponse {
                     message: format!("failed to start app: {e}"),
                     port: None,
                     apps: None,
+                    services: None,
                 };
             }
         }
@@ -421,6 +428,7 @@ async fn deploy_sequential(params: &DeployParams<'_>) -> DaemonResponse {
         message: format!("deployed {app} on port {port}"),
         port: Some(port),
         apps: None,
+        services: None,
     }
 }
 
@@ -448,6 +456,7 @@ async fn run_health_check(
                     message: format!("health check failed: {e}"),
                     port: None,
                     apps: None,
+                    services: None,
                 })
             }
         }
@@ -472,18 +481,21 @@ async fn handle_stop(
             message: format!("stopped {app}"),
             port: None,
             apps: None,
+            services: None,
         },
         Err(e) => DaemonResponse {
             success: false,
             message: format!("failed to stop {app}: {e}"),
             port: None,
             apps: None,
+            services: None,
         },
     }
 }
 
 async fn handle_status(
     process_manager: &Arc<Mutex<ProcessManager>>,
+    service_manager: &Arc<Mutex<ServiceManager>>,
     data_dir: &Path,
 ) -> DaemonResponse {
     let pm = process_manager.lock().await;
@@ -502,6 +514,7 @@ async fn handle_status(
                 message: format!("failed to read server state: {e}"),
                 port: None,
                 apps: None,
+                services: None,
             };
         }
     };
@@ -538,6 +551,7 @@ async fn handle_status(
         message: format!("{} app(s) running", entries.len()),
         port: None,
         apps: Some(entries),
+        services: Some(service_manager.lock().await.sidecar_status()),
     }
 }
 
@@ -660,6 +674,7 @@ mod tests {
             message: "deployed myapp on port 10001".into(),
             port: Some(10001),
             apps: None,
+            services: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: DaemonResponse = serde_json::from_str(&json).unwrap();
@@ -692,12 +707,20 @@ mod tests {
                 uptime_seconds: 3600,
                 health: "healthy".into(),
             }]),
+            services: Some(vec![SidecarStatus {
+                name: "meilisearch".into(),
+                running: true,
+                pid: Some(222),
+                uptime_seconds: 60,
+                restarts: 0,
+            }]),
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("cyanea"));
         assert!(json.contains("12345"));
         let parsed: DaemonResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.apps.unwrap().len(), 1);
+        assert_eq!(parsed.services.unwrap()[0].name, "meilisearch");
     }
 
     #[test]
@@ -707,6 +730,7 @@ mod tests {
             message: "deployed".into(),
             port: Some(10001),
             apps: None,
+            services: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(!json.contains("apps"));

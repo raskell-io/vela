@@ -98,7 +98,7 @@ pub fn start_proxy(
         if let Some(resolver) = cert_resolver {
             // Dynamic cert resolution (ACME or mixed)
             if let (Some(cert_path), Some(key_path)) = (&tls_config.cert, &tls_config.key)
-                && let Err(e) = resolver.load_cert("*", cert_path, key_path)
+                && let Err(e) = resolver.load_cert(super::acme::FALLBACK, cert_path, key_path)
             {
                 tracing::warn!(err = %e, "failed to load static TLS cert into resolver");
             }

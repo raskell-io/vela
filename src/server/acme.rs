@@ -299,6 +299,9 @@ impl AcmeClient {
     }
 }
 
+/// Resolver key of the static `[tls]` cert, served when no domain cert matches.
+pub const FALLBACK: &str = "*";
+
 /// Dynamic TLS certificate resolver that supports multiple domains.
 /// Implements rustls `ResolvesServerCert` for SNI-based cert selection.
 pub struct CertResolver {
@@ -354,6 +357,16 @@ impl CertResolver {
         Ok(())
     }
 
+    /// The cert for a server name, falling back to the static `[tls]` cert
+    /// (stored under `FALLBACK`) for unknown names and clients without SNI.
+    fn lookup(&self, server_name: Option<&str>) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        let certs = self.certs.read().expect("cert resolver lock poisoned");
+        server_name
+            .and_then(|name| certs.get(name))
+            .or_else(|| certs.get(FALLBACK))
+            .cloned()
+    }
+
     /// Check if a certificate is loaded for a domain.
     #[allow(dead_code)]
     pub fn has_cert(&self, domain: &str) -> bool {
@@ -369,12 +382,7 @@ impl rustls::server::ResolvesServerCert for CertResolver {
         &self,
         client_hello: rustls::server::ClientHello<'_>,
     ) -> Option<Arc<rustls::sign::CertifiedKey>> {
-        let server_name = client_hello.server_name()?;
-        self.certs
-            .read()
-            .expect("cert resolver lock poisoned")
-            .get(server_name)
-            .cloned()
+        self.lookup(client_hello.server_name())
     }
 }
 
@@ -459,6 +467,38 @@ mod tests {
         let (requests, rx) = CertRequests::channel();
         drop(rx);
         requests.request("new.example.com");
+    }
+
+    fn write_self_signed(dir: &Path, name: &str) -> (PathBuf, PathBuf) {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec![name.to_string()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let cert_path = dir.join(format!("{name}.crt"));
+        let key_path = dir.join(format!("{name}.key"));
+        std::fs::write(&cert_path, cert.pem()).unwrap();
+        std::fs::write(&key_path, key.serialize_pem()).unwrap();
+        (cert_path, key_path)
+    }
+
+    #[test]
+    fn static_cert_is_the_fallback_for_unknown_names_and_no_sni() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let dir = tempfile::tempdir().unwrap();
+        let resolver = CertResolver::new();
+
+        assert!(resolver.lookup(Some("other.example.com")).is_none());
+
+        let (c, k) = write_self_signed(dir.path(), "app.example.com");
+        resolver.load_cert("app.example.com", &c, &k).unwrap();
+        let (c, k) = write_self_signed(dir.path(), "origin");
+        resolver.load_cert(FALLBACK, &c, &k).unwrap();
+
+        let exact = resolver.lookup(Some("app.example.com")).unwrap();
+        let fallback = resolver.lookup(Some("other.example.com")).unwrap();
+        assert!(!Arc::ptr_eq(&exact, &fallback));
+        assert!(Arc::ptr_eq(&fallback, &resolver.lookup(None).unwrap()));
     }
 
     #[test]

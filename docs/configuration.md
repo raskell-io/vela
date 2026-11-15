@@ -205,6 +205,41 @@ Vela downloads the NATS binary from GitHub releases, generates a config file, st
 
 NATS listens on `127.0.0.1:4222` (client) and `127.0.0.1:8222` (monitoring/health).
 
+### Any other service (Meilisearch, Redis, MinIO, …)
+
+A `[services.<name>]` table with a `command` runs that command as a supervised sidecar. Vela does not install it: put the binary on the server first.
+
+```toml
+[services.meilisearch]
+command = "/usr/local/bin/meilisearch"
+args = ["--db-path", "${data_dir}", "--env", "production", "--http-addr", "127.0.0.1:7700"]
+health = "http://127.0.0.1:7700/health"   # optional: must answer 2xx within 30s
+restart = "always"                          # "always" (default), "on-failure" or "never"
+
+[services.meilisearch.env]                  # environment for the service
+MEILI_MASTER_KEY = "${secret:MEILI_MASTER_KEY}"
+
+[services.meilisearch.export]               # environment injected into your app
+MEILI_URL = "http://127.0.0.1:7700"
+```
+
+| Key | Meaning |
+|-----|---------|
+| `command` | Absolute path to the executable |
+| `args` | Arguments, as a list |
+| `env` | Environment for the service process |
+| `export` | Environment variables your app receives (the app's own `[env]` wins on conflicts) |
+| `health` | HTTP URL checked before your app starts; without it, the process must stay up for one second |
+| `restart` | What to do when the process exits |
+
+- `${data_dir}` expands to `/var/vela/services/<name>/data`, which persists across deploys and is the service's working directory.
+- `${secret:KEY}` expands to the app's secret `KEY` (`vela secret set <app> KEY=VALUE`), so keys stay out of `Vela.toml`.
+- The service starts before your app on every deploy. If its spec changed, it is restarted first; if it fails to start or fails its health check, the deploy fails and the running app stays.
+- Vela restarts crashed services according to `restart`, restores them when the daemon starts, and stops them (SIGTERM, then SIGKILL after 10s) when it shuts down.
+- `vela status` lists services with their pid, uptime and restart count. Logs go to `/var/vela/services/<name>/service.log`.
+- Names use lowercase letters, digits, `-` and `_`. `postgres` and `nats` are reserved for the built-in providers above.
+- Removing a service from `Vela.toml` does not stop it yet; stop it with `systemctl restart vela` after deleting `/var/vela/services/<name>/service.toml`.
+
 ## Build (Remote Builds)
 
 Build your app on the server instead of locally. Useful for Elixir releases or when cross-compilation is impractical.

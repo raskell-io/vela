@@ -1,7 +1,9 @@
 //! Service dependency management.
 //!
-//! Manages external services (Postgres, NATS, etc.) that apps depend on.
-//! Services are provisioned on first use and supervised by the daemon.
+//! Manages external services that apps depend on: the curated Postgres and
+//! NATS providers, and generic sidecars (any `[services.<name>]` table with a
+//! `command`, see `sidecar.rs`). Services are provisioned on first use and
+//! supervised by the daemon.
 
 use std::collections::HashMap;
 use std::io::Read as _;
@@ -10,6 +12,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::process::Child;
+
+use super::sidecar::{self, SidecarManager, SidecarSpec, SidecarStatus};
 
 // ---------------------------------------------------------------------------
 // Service-specific config types
@@ -62,6 +66,8 @@ pub struct ServiceManager {
     services_dir: PathBuf,
     /// Running NATS process (owned by daemon). Postgres is managed by systemd.
     nats_process: Option<Child>,
+    /// Generic sidecar services declared with a `command`.
+    sidecars: SidecarManager,
 }
 
 impl ServiceManager {
@@ -69,6 +75,7 @@ impl ServiceManager {
         let services_dir = data_dir.join("services");
         std::fs::create_dir_all(&services_dir).ok();
         Self {
+            sidecars: SidecarManager::new(&services_dir),
             services_dir,
             nats_process: None,
         }
@@ -81,6 +88,14 @@ impl ServiceManager {
         service_type: &str,
         config: &toml::Value,
     ) -> Result<Vec<(String, String)>> {
+        if sidecar::is_sidecar(config) {
+            let spec: SidecarSpec = config
+                .clone()
+                .try_into()
+                .with_context(|| format!("invalid [services.{service_type}] config"))?;
+            return self.sidecars.ensure(service_type, spec).await;
+        }
+
         match service_type {
             "postgres" => {
                 let pg_config: PostgresConfig = config
@@ -96,7 +111,9 @@ impl ServiceManager {
                     .context("invalid [services.nats] config")?;
                 self.ensure_nats(&nats_config).await
             }
-            other => anyhow::bail!("unknown service type: {other}"),
+            other => anyhow::bail!(
+                "unknown service type: {other} (set `command` to run it as a generic service)"
+            ),
         }
     }
 
@@ -122,11 +139,15 @@ impl ServiceManager {
             let _ = run_cmd("systemctl", &["start", "postgresql"]);
         }
 
+        self.sidecars.restore().await;
+
         Ok(())
     }
 
-    /// Check NATS process and restart if crashed.
+    /// Check NATS and sidecar processes and restart them if they crashed.
     pub async fn check_and_restart(&mut self) {
+        self.sidecars.check_and_restart().await;
+
         if let Some(ref mut child) = self.nats_process {
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -147,11 +168,18 @@ impl ServiceManager {
 
     /// Stop all managed services.
     pub async fn stop_all(&mut self) {
+        self.sidecars.stop_all().await;
+
         if let Some(ref mut child) = self.nats_process {
             tracing::info!("stopping NATS");
             let _ = child.kill().await;
             self.nats_process = None;
         }
+    }
+
+    /// Status of generic sidecar services, for `vela status`.
+    pub fn sidecar_status(&mut self) -> Vec<SidecarStatus> {
+        self.sidecars.status()
     }
 
     // -----------------------------------------------------------------------

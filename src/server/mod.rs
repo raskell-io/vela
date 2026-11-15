@@ -6,6 +6,7 @@ mod process;
 mod proxy;
 mod sandbox;
 pub(crate) mod service;
+mod sidecar;
 mod state;
 
 use std::io::Read as _;
@@ -423,12 +424,13 @@ fn apps_live(json: bool) -> Result<()> {
         }
 
         let apps = response.apps.unwrap_or_default();
+        let services = response.services.unwrap_or_default();
 
         if json {
             let output = serde_json::to_string_pretty(&apps)?;
             println!("{output}");
         } else {
-            if apps.is_empty() {
+            if apps.is_empty() && services.is_empty() {
                 println!("no apps running");
                 return Ok(());
             }
@@ -448,6 +450,27 @@ fn apps_live(json: bool) -> Result<()> {
                     "  {:<16} {:<24} {:<22} {:<12} up {}",
                     app.name, app.domain, health_display, pid, uptime
                 );
+            }
+
+            if !services.is_empty() {
+                println!("\n  services:");
+                for svc in &services {
+                    let state = if svc.running { "running" } else { "stopped" };
+                    let pid = svc.pid.map_or("-".to_string(), |p| format!("pid {p}"));
+                    let restarts = match svc.restarts {
+                        0 => String::new(),
+                        n => format!(", {n} restart(s)"),
+                    };
+                    println!(
+                        "  {:<16} {:<24} {:<22} {:<12} up {}{}",
+                        svc.name,
+                        "",
+                        state,
+                        pid,
+                        format_uptime(svc.uptime_seconds),
+                        restarts
+                    );
+                }
             }
         }
 
@@ -660,7 +683,7 @@ pub fn internal_deploy(args: InternalDeployArgs) -> Result<()> {
                 health_path: health_path.map(String::from),
                 drain_seconds: drain,
                 domain: manifest.app.domain.clone(),
-                services: manifest.services.clone(),
+                services: resolve_service_secrets(&manifest.services, &secrets)?,
             },
         )
         .await?;
@@ -714,6 +737,30 @@ pub fn internal_deploy(args: InternalDeployArgs) -> Result<()> {
 
         Ok(())
     })
+}
+
+/// Resolve `${secret:KEY}` references in generic sidecar specs with the
+/// app's secrets, so secrets never have to be written into `Vela.toml`.
+fn resolve_service_secrets(
+    services: &std::collections::HashMap<String, toml::Value>,
+    secrets: &[(String, String)],
+) -> Result<std::collections::HashMap<String, toml::Value>> {
+    services
+        .iter()
+        .map(|(name, config)| {
+            if !sidecar::is_sidecar(config) {
+                return Ok((name.clone(), config.clone()));
+            }
+            let mut spec: sidecar::SidecarSpec = config
+                .clone()
+                .try_into()
+                .with_context(|| format!("invalid [services.{name}] config"))?;
+            sidecar::resolve_secrets(&mut spec, secrets);
+            let value = toml::Value::try_from(spec)
+                .with_context(|| format!("failed to encode [services.{name}]"))?;
+            Ok((name.clone(), value))
+        })
+        .collect()
 }
 
 /// Internal rollback command — called by the client over SSH.

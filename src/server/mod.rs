@@ -64,57 +64,33 @@ pub fn run(args: ServeArgs) -> Result<()> {
         restore_apps(&config, &state, &process_manager, &route_table).await?;
 
         // Set up ACME / dynamic TLS if configured
-        let cert_resolver = if config.tls.acme_email.is_some() {
+        let (cert_resolver, cert_requests) = if let Some(email) = config.tls.acme_email.clone() {
             let resolver = Arc::new(acme::CertResolver::new());
 
-            // Load any existing certs from disk
-            let active_apps = state.list_active_apps()?;
-            let domains: Vec<String> = active_apps.iter().map(|a| a.domain.clone()).collect();
-
-            for domain in &domains {
-                let paths = acme::CertPaths::for_domain(&config.data_dir, domain);
+            // Load any existing certs from disk before the proxy starts serving
+            for domain in active_domains(&state) {
+                let paths = acme::CertPaths::for_domain(&config.data_dir, &domain);
                 if paths.exists()
-                    && let Err(e) = resolver.load_cert(domain, &paths.cert, &paths.key)
+                    && let Err(e) = resolver.load_cert(&domain, &paths.cert, &paths.key)
                 {
                     tracing::warn!(domain, err = %e, "failed to load existing cert");
                 }
             }
 
-            // Spawn background cert provisioning
-            let data_dir = config.data_dir.clone();
-            let email = config.tls.acme_email.clone().unwrap();
-            let staging = config.tls.staging;
-            let cs = challenge_store.clone();
-            let cr = resolver.clone();
+            let (requests, rx) = acme::CertRequests::channel();
+            let task = CertTask {
+                data_dir: config.data_dir.clone(),
+                email,
+                staging: config.tls.staging,
+                challenge_store: challenge_store.clone(),
+                resolver: resolver.clone(),
+                state: state::ServerState::open(&config)?,
+            };
+            tokio::spawn(task.run(rx));
 
-            tokio::spawn(async move {
-                // Initial provisioning
-                if let Err(e) =
-                    acme::provision_and_load_certs(&data_dir, &domains, &email, &cs, &cr, staging)
-                        .await
-                {
-                    tracing::error!(err = %e, "ACME cert provisioning failed");
-                }
-
-                // Check for renewals every 12 hours
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(12 * 3600));
-                interval.tick().await; // skip first immediate tick
-                loop {
-                    interval.tick().await;
-                    tracing::debug!("checking for certificate renewals");
-                    if let Err(e) = acme::provision_and_load_certs(
-                        &data_dir, &domains, &email, &cs, &cr, staging,
-                    )
-                    .await
-                    {
-                        tracing::error!(err = %e, "ACME cert renewal check failed");
-                    }
-                }
-            });
-
-            Some(resolver)
+            (Some(resolver), Some(requests))
         } else {
-            None
+            (None, None)
         };
 
         // Start the reverse proxy
@@ -133,8 +109,15 @@ pub fn run(args: ServeArgs) -> Result<()> {
         let ipc_sock = sock_path.clone();
         let ipc_data_dir = config.data_dir.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                ipc::start_ipc_server(&ipc_sock, ipc_pm, ipc_rt, ipc_sm, ipc_data_dir).await
+            if let Err(e) = ipc::start_ipc_server(
+                &ipc_sock,
+                ipc_pm,
+                ipc_rt,
+                ipc_sm,
+                ipc_data_dir,
+                cert_requests,
+            )
+            .await
             {
                 tracing::error!(err = %e, "IPC server exited with error");
             }
@@ -241,6 +224,86 @@ pub fn run(args: ServeArgs) -> Result<()> {
 
         Ok(())
     })
+}
+
+/// Domains of all apps that have an active release.
+fn active_domains(state: &state::ServerState) -> Vec<String> {
+    match state.list_active_apps() {
+        Ok(apps) => apps.into_iter().map(|a| a.domain).collect(),
+        Err(e) => {
+            tracing::error!(err = %e, "failed to list active apps for certificates");
+            Vec::new()
+        }
+    }
+}
+
+/// Background task that keeps TLS certificates loaded and provisioned.
+///
+/// It runs for all active domains at start-up and every 12 hours (renewals),
+/// for a single domain whenever an app is activated, and for all active
+/// domains again on SIGHUP (`systemctl reload vela`), which also picks up
+/// certificate files placed in the tls directory by hand.
+struct CertTask {
+    data_dir: PathBuf,
+    email: String,
+    staging: bool,
+    challenge_store: acme::ChallengeStore,
+    resolver: Arc<acme::CertResolver>,
+    state: state::ServerState,
+}
+
+impl CertTask {
+    async fn run(self, mut requests: tokio::sync::mpsc::UnboundedReceiver<String>) {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut hangup = match signal(SignalKind::hangup()) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::warn!(err = %e, "cannot listen for SIGHUP, certificate reload disabled");
+                None
+            }
+        };
+
+        // The first tick fires immediately and does the initial provisioning.
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(12 * 3600));
+
+        loop {
+            let domains = tokio::select! {
+                _ = interval.tick() => {
+                    tracing::debug!("checking certificates for all active apps");
+                    active_domains(&self.state)
+                }
+                Some(domain) = requests.recv() => vec![domain],
+                () = next_hangup(&mut hangup) => {
+                    tracing::info!("SIGHUP received, reloading certificates");
+                    active_domains(&self.state)
+                }
+            };
+
+            if let Err(e) = acme::provision_and_load_certs(
+                &self.data_dir,
+                &domains,
+                &self.email,
+                &self.challenge_store,
+                &self.resolver,
+                self.staging,
+            )
+            .await
+            {
+                tracing::error!(err = %e, "certificate provisioning failed");
+            }
+        }
+    }
+}
+
+/// Resolve on the next SIGHUP; never resolves if signals are unavailable.
+async fn next_hangup(hangup: &mut Option<tokio::signal::unix::Signal>) {
+    if let Some(sig) = hangup
+        && sig.recv().await.is_some()
+    {
+        return;
+    }
+    std::future::pending().await
 }
 
 /// Restore apps that were active before a restart.
@@ -840,6 +903,7 @@ After=network.target
 [Service]
 Type=simple
 ExecStart={vela_bin} serve --config {config_path}
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5
 Environment=RUST_LOG=info

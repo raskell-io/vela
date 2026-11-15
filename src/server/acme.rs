@@ -42,6 +42,31 @@ impl ChallengeStore {
     }
 }
 
+/// Handle for asking the running certificate task to make sure a domain has
+/// a certificate (load it from disk, or provision it via ACME).
+///
+/// The daemon collects domains at start-up; apps activated later announce
+/// their domain through this handle so they get a certificate without a restart.
+#[derive(Debug, Clone)]
+pub struct CertRequests(tokio::sync::mpsc::UnboundedSender<String>);
+
+impl CertRequests {
+    pub fn channel() -> (Self, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (Self(tx), rx)
+    }
+
+    /// Queue a domain for certificate loading or provisioning.
+    pub fn request(&self, domain: &str) {
+        if self.0.send(domain.to_string()).is_err() {
+            tracing::warn!(
+                domain,
+                "certificate task is not running, cannot request cert"
+            );
+        }
+    }
+}
+
 /// Paths for stored TLS certificates.
 pub struct CertPaths {
     pub cert: PathBuf,
@@ -420,6 +445,20 @@ mod tests {
         let paths = CertPaths::for_domain(Path::new("/var/vela"), "example.com");
         assert_eq!(paths.cert, PathBuf::from("/var/vela/tls/example.com.crt"));
         assert_eq!(paths.key, PathBuf::from("/var/vela/tls/example.com.key"));
+    }
+
+    #[tokio::test]
+    async fn cert_requests_reach_the_receiver() {
+        let (requests, mut rx) = CertRequests::channel();
+        requests.clone().request("new.example.com");
+        assert_eq!(rx.recv().await.as_deref(), Some("new.example.com"));
+    }
+
+    #[test]
+    fn cert_requests_without_receiver_do_not_panic() {
+        let (requests, rx) = CertRequests::channel();
+        drop(rx);
+        requests.request("new.example.com");
     }
 
     #[test]

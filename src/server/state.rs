@@ -19,6 +19,10 @@ pub struct AppConfig {
     /// Manifest-level environment variables, persisted across restarts.
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Manifest `[services]`, unresolved (no secrets), so restarts and
+    /// rollbacks can rebuild the same environment as a deploy.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub services: HashMap<String, toml::Value>,
 }
 
 /// Runtime info derived from the filesystem.
@@ -179,11 +183,25 @@ impl ServerState {
             deploy_strategy: deploy_strategy.into(),
             drain_seconds,
             env,
+            services: HashMap::new(),
         };
 
         let toml_str = toml::to_string_pretty(&config).context("failed to serialize app config")?;
         std::fs::write(self.app_config_path(name), toml_str)?;
 
+        Ok(())
+    }
+
+    /// Record the services an app declares (call after `register_app`).
+    pub fn set_app_services(
+        &self,
+        name: &str,
+        services: HashMap<String, toml::Value>,
+    ) -> Result<()> {
+        let mut config = self.load_app_config(name)?;
+        config.services = services;
+        let toml_str = toml::to_string_pretty(&config).context("failed to serialize app config")?;
+        std::fs::write(self.app_config_path(name), toml_str)?;
         Ok(())
     }
 
@@ -559,6 +577,30 @@ mod tests {
 
         let secrets = state.get_secrets("myapp").unwrap();
         assert_eq!(secrets.len(), 1);
+    }
+
+    #[test]
+    fn app_services_round_trip() {
+        let (_dir, state) = test_state();
+        state
+            .register_app(
+                "myapp",
+                "myapp.com",
+                "binary",
+                None,
+                None,
+                "blue-green",
+                5,
+                HashMap::new(),
+            )
+            .unwrap();
+        assert!(state.get_app("myapp").unwrap().unwrap().services.is_empty());
+
+        let services: HashMap<String, toml::Value> =
+            toml::from_str("[postgres]\ndatabases = [\"myapp\"]").unwrap();
+        state.set_app_services("myapp", services).unwrap();
+        let app = state.get_app("myapp").unwrap().unwrap();
+        assert!(app.services.contains_key("postgres"));
     }
 
     #[test]

@@ -62,7 +62,14 @@ pub fn run(args: ServeArgs) -> Result<()> {
         }
 
         // Restore previously active apps
-        restore_apps(&config, &state, &process_manager, &route_table).await?;
+        restore_apps(
+            &config,
+            &state,
+            &process_manager,
+            &service_manager,
+            &route_table,
+        )
+        .await?;
 
         // Set up ACME / dynamic TLS if configured
         let (cert_resolver, cert_requests) = if let Some(email) = config.tls.acme_email.clone() {
@@ -312,6 +319,7 @@ async fn restore_apps(
     config: &ServerConfig,
     state: &state::ServerState,
     process_manager: &Arc<Mutex<process::ProcessManager>>,
+    service_manager: &Arc<Mutex<service::ServiceManager>>,
     route_table: &proxy::RouteTable,
 ) -> Result<()> {
     let active_apps = state.list_active_apps()?;
@@ -337,19 +345,23 @@ async fn restore_apps(
         let app_type = AppType::from_str_loose(&app.app_type);
         let data_dir = deploy::ensure_data_dir(&config.apps_dir(), &app.name)?;
 
-        // Merge env: manifest env vars first, then secrets override
+        // Same environment as a deploy: manifest env, secrets, service exports
         let secrets = state.get_secrets(&app.name)?;
-        let mut env_vars: Vec<(String, String)> = app
-            .env
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        for (key, value) in &secrets {
-            if let Some(existing) = env_vars.iter_mut().find(|(k, _)| k == key) {
-                existing.1 = value.clone();
-            } else {
-                env_vars.push((key.clone(), value.clone()));
+        let mut env_vars = app_env(&app.env, &secrets);
+        match resolve_service_secrets(&app.services, &secrets) {
+            Ok(services) => {
+                let mut sm = service_manager.lock().await;
+                for (svc_type, svc_config) in &services {
+                    match sm.ensure_service(svc_type, svc_config).await {
+                        Ok(vars) => add_missing_env(&mut env_vars, vars),
+                        Err(e) => tracing::error!(
+                            app = %app.name, service = %svc_type, err = %e,
+                            "failed to restore service for app"
+                        ),
+                    }
+                }
             }
+            Err(e) => tracing::error!(app = %app.name, err = %e, "invalid services config"),
         }
 
         let mut pm = process_manager.lock().await;
@@ -602,6 +614,7 @@ pub fn internal_deploy(args: InternalDeployArgs) -> Result<()> {
         drain,
         manifest.env.clone(),
     )?;
+    state.set_app_services(app_name, manifest.services.clone())?;
 
     // Generate release ID and extract
     let release_id = deploy::generate_release_id();
@@ -612,28 +625,8 @@ pub fn internal_deploy(args: InternalDeployArgs) -> Result<()> {
     sandbox::prepare_sandbox(app_name, &release_dir, &data_dir)?;
 
     // Collect env vars (manifest env + secrets)
-    let mut env_vars: Vec<(String, String)> = manifest
-        .env
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-
-    // Resolve ${secret:KEY} references and add secrets as env vars
     let secrets = state.get_secrets(app_name)?;
-    for (_env_key, env_val) in &mut env_vars {
-        for (secret_key, secret_val) in &secrets {
-            let placeholder = format!("${{secret:{secret_key}}}");
-            if env_val.contains(&placeholder) {
-                *env_val = env_val.replace(&placeholder, secret_val);
-            }
-        }
-    }
-    // Also inject secrets directly as env vars
-    for (key, value) in &secrets {
-        if !env_vars.iter().any(|(k, _)| k == key) {
-            env_vars.push((key.clone(), value.clone()));
-        }
-    }
+    let env_vars = app_env(&manifest.env, &secrets);
 
     // Run pre_start hook if configured
     if let Some(ref pre_start) = manifest.deploy.pre_start {
@@ -739,6 +732,41 @@ pub fn internal_deploy(args: InternalDeployArgs) -> Result<()> {
     })
 }
 
+/// Environment for an app process, the same for deploy, rollback and restore:
+/// the manifest `[env]` with `${secret:KEY}` resolved, then every secret whose
+/// key the manifest does not set. Service exports are added after this, only
+/// for keys still unset. Sorted by key so restarts are deterministic.
+fn app_env(
+    env: &std::collections::HashMap<String, String>,
+    secrets: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut vars: Vec<(String, String)> = env
+        .iter()
+        .map(|(key, value)| {
+            let mut value = value.clone();
+            for (secret_key, secret_val) in secrets {
+                value = value.replace(&format!("${{secret:{secret_key}}}"), secret_val);
+            }
+            (key.clone(), value)
+        })
+        .collect();
+    vars.sort();
+    add_missing_env(&mut vars, secrets.iter().cloned());
+    vars
+}
+
+/// Append variables whose keys are not set yet.
+fn add_missing_env(
+    vars: &mut Vec<(String, String)>,
+    extra: impl IntoIterator<Item = (String, String)>,
+) {
+    for (key, value) in extra {
+        if !vars.iter().any(|(k, _)| *k == key) {
+            vars.push((key, value));
+        }
+    }
+}
+
 /// Resolve `${secret:KEY}` references in generic sidecar specs with the
 /// app's secrets, so secrets never have to be written into `Vela.toml`.
 fn resolve_service_secrets(
@@ -812,11 +840,11 @@ pub fn internal_rollback(args: InternalRollbackArgs) -> Result<()> {
                 app_type: app.app_type.clone(),
                 strategy: app.deploy_strategy.clone(),
                 data_dir,
-                env_vars: secrets,
+                env_vars: app_env(&app.env, &secrets),
                 health_path: app.health_path.clone(),
                 drain_seconds: app.drain_seconds,
                 domain: app.domain.clone(),
-                services: std::collections::HashMap::new(),
+                services: resolve_service_secrets(&app.services, &secrets)?,
             },
         )
         .await?;
@@ -988,4 +1016,60 @@ WantedBy=multi-user.target
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod env_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn secrets() -> Vec<(String, String)> {
+        vec![
+            ("API_KEY".into(), "sk-1".into()),
+            ("DB_PASS".into(), "pw".into()),
+        ]
+    }
+
+    #[test]
+    fn manifest_env_resolves_secret_refs_and_wins_over_secrets() {
+        let env = HashMap::from([
+            (
+                "DB_URL".to_string(),
+                "pg://u:${secret:DB_PASS}@h/db".to_string(),
+            ),
+            ("API_KEY".to_string(), "from-manifest".to_string()),
+        ]);
+        let vars = app_env(&env, &secrets());
+        assert_eq!(
+            vars,
+            vec![
+                ("API_KEY".to_string(), "from-manifest".to_string()),
+                ("DB_URL".to_string(), "pg://u:pw@h/db".to_string()),
+                ("DB_PASS".to_string(), "pw".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn service_exports_only_fill_unset_keys() {
+        let env = HashMap::from([("DATABASE_URL".to_string(), "mine".to_string())]);
+        let mut vars = app_env(&env, &[]);
+        add_missing_env(
+            &mut vars,
+            vec![
+                ("DATABASE_URL".to_string(), "from-postgres".to_string()),
+                ("NATS_URL".to_string(), "nats://localhost:4222".to_string()),
+            ],
+        );
+        assert_eq!(vars[0].1, "mine");
+        assert_eq!(vars[1].0, "NATS_URL");
+    }
+
+    #[test]
+    fn plain_services_pass_through_secret_resolution() {
+        let services: HashMap<String, toml::Value> =
+            toml::from_str("[postgres]\ndatabases = [\"app\"]").unwrap();
+        let resolved = resolve_service_secrets(&services, &secrets()).unwrap();
+        assert_eq!(resolved, services);
+    }
 }

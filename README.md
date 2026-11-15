@@ -183,6 +183,7 @@ databases = ["my_app_prod"]
 - [Architecture](docs/architecture.md) — system design, services, and internals
 - [Elixir/Phoenix Guide](docs/elixir-phoenix.md) — deploying BEAM releases with services and remote builds
 - [Cloudflare Integration](docs/cloudflare.md) — using Cloudflare with Vela
+- [Vision, Strategy and Roadmap](docs/roadmap.md) — where Vela is going and what stays fixed
 
 ## Status
 
@@ -211,7 +212,8 @@ All core functionality is built, tested, and working:
 - [x] Manifest env vars persisted across daemon restarts
 - [x] Deploy hooks (`pre_start` and `post_deploy`)
 - [x] HTTP → HTTPS redirect (with ACME challenge passthrough)
-- [x] ACME certificate auto-renewal (checks daily, renews at 30 days before expiry)
+- [x] ACME certificate auto-renewal (checks every 12 hours, renews at 30 days before expiry)
+- [x] Certificates for newly deployed domains without a restart; `systemctl reload vela` reloads certs
 - [x] Service dependencies: Postgres lifecycle management (install, provision, DATABASE_URL injection)
 - [x] Service dependencies: NATS lifecycle management (download, supervise, NATS_URL injection)
 - [x] Service dependencies framework (ServiceManager with per-service state persistence)
@@ -220,11 +222,15 @@ All core functionality is built, tested, and working:
 - [x] Machine-readable status (`vela status --json` with live health probes, PID, uptime)
 - [x] WebSocket proxying (upgrade passthrough, bidirectional tunnel)
 - [x] mTLS client verification (`client_ca`, e.g. Cloudflare Authenticated Origin Pulls)
+- [x] Generic sidecar services (any command, e.g. Meilisearch or Redis: supervised, health-checked, env exports)
 
-Coming next:
+Coming next (see the [roadmap](docs/roadmap.md)):
 
-- [ ] Process isolation (Linux namespaces, cgroups v2)
-- [ ] Resource limits (memory, CPU weight)
+- [ ] Job and cron workloads, `exec` type for any command
+- [ ] Canary deploys
+- [ ] Resource limits (cgroups v2 memory, CPU)
+- [ ] Several servers per app, deployed from one `Vela.toml`
+- [ ] Process isolation (Linux namespaces, separate user per app)
 
 ## Building from Source
 

@@ -69,7 +69,7 @@ When a deploy swaps, the route table updates atomically. Old connections drain f
 
 Two modes:
 
-- **ACME (Let's Encrypt)** — Set `acme_email` in server.toml. Vela provisions certs on first request and renews them automatically when they're within 30 days of expiry. HTTP-01 challenge validation on port 80.
+- **ACME (Let's Encrypt)** — Set `acme_email` in server.toml. Vela provisions a cert for each app's domain when the daemon starts and whenever an app is activated, so a newly deployed domain gets its cert without a restart. Certs are renewed automatically when they're within 30 days of expiry (checked every 12 hours). HTTP-01 challenge validation on port 80. Per-domain certs you place in `/var/vela/tls/<domain>.crt` and `<domain>.key` are loaded the same way; after adding or replacing them by hand, run `systemctl reload vela` (SIGHUP) to load them without interrupting apps.
 - **Static certs** — Set `cert` and `key` paths in server.toml. Use with Cloudflare Origin Certificates or any custom cert.
 
 Optionally, `client_ca` turns on mutual TLS: clients must present a certificate signed by that CA or the handshake fails. This is meant for Cloudflare Authenticated Origin Pulls.

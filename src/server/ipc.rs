@@ -8,6 +8,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
+use super::acme::CertRequests;
 use super::process::ProcessManager;
 use super::proxy::RouteTable;
 use super::service::ServiceManager;
@@ -84,6 +85,7 @@ pub async fn start_ipc_server(
     route_table: RouteTable,
     service_manager: Arc<Mutex<ServiceManager>>,
     data_dir: PathBuf,
+    cert_requests: Option<CertRequests>,
 ) -> Result<()> {
     // Remove stale socket from a previous run
     let _ = std::fs::remove_file(sock_path);
@@ -110,9 +112,10 @@ pub async fn start_ipc_server(
         let rt = route_table.clone();
         let sm = service_manager.clone();
         let dd = data_dir.clone();
+        let cr = cert_requests.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, pm, rt, sm, dd).await {
+            if let Err(e) = handle_connection(stream, pm, rt, sm, dd, cr).await {
                 tracing::error!(err = %e, "IPC connection error");
             }
         });
@@ -125,6 +128,7 @@ async fn handle_connection(
     route_table: RouteTable,
     service_manager: Arc<Mutex<ServiceManager>>,
     data_dir: PathBuf,
+    cert_requests: Option<CertRequests>,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -149,7 +153,7 @@ async fn handle_connection(
             services,
         } => {
             // Provision services and inject their env vars
-            if !services.is_empty() {
+            let response = if !services.is_empty() {
                 let mut sm = service_manager.lock().await;
                 let mut svc_failed = None;
                 for (svc_type, svc_config) in &services {
@@ -207,7 +211,17 @@ async fn handle_connection(
                     &domain,
                 )
                 .await
+            };
+
+            // An app activated after daemon start may bring a new domain:
+            // make sure it has a certificate without restarting the daemon.
+            if response.success
+                && let Some(requests) = &cert_requests
+            {
+                requests.request(&domain);
             }
+
+            response
         }
         DaemonRequest::Stop { app, domain } => {
             handle_stop(&process_manager, &route_table, &app, &domain).await

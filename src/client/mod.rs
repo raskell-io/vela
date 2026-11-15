@@ -154,6 +154,8 @@ pub fn rollback(args: RollbackArgs) -> Result<()> {
     Ok(())
 }
 
+/// Secrets live in root-owned app directories, so `_secret` runs through the
+/// same scoped `sudo vela` path as `_deploy`.
 pub fn secret(args: SecretArgs) -> Result<()> {
     match args.action {
         SecretAction::Set {
@@ -162,16 +164,21 @@ pub fn secret(args: SecretArgs) -> Result<()> {
             server,
             manifest,
         } => {
+            check_secret_app_arg(&app)?;
+            if !pair.contains('=') {
+                anyhow::bail!("expected KEY=VALUE, got '{pair}'");
+            }
             let server = resolve_server(server, &manifest)?;
-            ssh::run_remote(&server, &["vela", "_secret", "set", &app, &pair])?;
+            ssh::run_remote(&server, &["sudo", "vela", "_secret", "set", &app, &pair])?;
         }
         SecretAction::List {
             app,
             server,
             manifest,
         } => {
+            check_secret_app_arg(&app)?;
             let server = resolve_server(server, &manifest)?;
-            ssh::run_remote(&server, &["vela", "_secret", "list", &app])?;
+            ssh::run_remote(&server, &["sudo", "vela", "_secret", "list", &app])?;
         }
         SecretAction::Remove {
             app,
@@ -179,9 +186,18 @@ pub fn secret(args: SecretArgs) -> Result<()> {
             server,
             manifest,
         } => {
+            check_secret_app_arg(&app)?;
             let server = resolve_server(server, &manifest)?;
-            ssh::run_remote(&server, &["vela", "_secret", "remove", &app, &key])?;
+            ssh::run_remote(&server, &["sudo", "vela", "_secret", "remove", &app, &key])?;
         }
+    }
+    Ok(())
+}
+
+/// Catch a missing app name (`vela secret set KEY=VALUE ...`) before connecting.
+fn check_secret_app_arg(app: &str) -> Result<()> {
+    if app.contains('=') {
+        anyhow::bail!("'{app}' is not an app name; usage: vela secret set <app> KEY=VALUE");
     }
     Ok(())
 }
@@ -202,4 +218,15 @@ fn resolve_server(server: Option<String>, manifest_path: &Path) -> Result<String
         .deploy
         .server
         .context("no server specified (use --server or set deploy.server in Vela.toml)")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_app_arg_rejects_key_value_pair() {
+        assert!(check_secret_app_arg("SECRET_KEY_BASE=abc").is_err());
+        assert!(check_secret_app_arg("cyanea").is_ok());
+    }
 }

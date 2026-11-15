@@ -47,6 +47,51 @@ pub struct ServerState {
     apps_dir: PathBuf,
 }
 
+/// Reject app names that are unsafe as a directory name under the apps dir
+/// or that are clearly a misplaced `KEY=VALUE` pair.
+pub fn validate_app_name(name: &str) -> Result<()> {
+    if name.contains('=') {
+        anyhow::bail!(
+            "invalid app name '{name}': looks like a KEY=VALUE pair \
+             (usage: vela secret set <app> KEY=VALUE)"
+        );
+    }
+    let unsafe_name = name.is_empty()
+        || name.starts_with('.')
+        || name
+            .chars()
+            .any(|c| c == '/' || c == '\\' || c.is_whitespace() || c.is_control());
+    if unsafe_name {
+        anyhow::bail!("invalid app name '{name}'");
+    }
+    Ok(())
+}
+
+/// Whether a name is acceptable for an app that does not exist yet:
+/// lowercase letters, digits, '-', '_' and '.', starting with a letter or digit.
+fn is_new_app_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "-_.".contains(c))
+}
+
+/// Secret keys become environment variables, so they must be valid env names.
+pub fn validate_secret_key(key: &str) -> Result<()> {
+    let mut chars = key.chars();
+    let valid = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !valid {
+        anyhow::bail!(
+            "invalid secret key '{key}': use letters, digits and '_', not starting with a digit"
+        );
+    }
+    Ok(())
+}
+
 impl ServerState {
     pub fn open(config: &ServerConfig) -> Result<Self> {
         let apps_dir = config.apps_dir();
@@ -254,12 +299,29 @@ impl ServerState {
     // -----------------------------------------------------------------------
 
     pub fn set_secret(&self, app_name: &str, key: &str, value: &str) -> Result<()> {
+        validate_app_name(app_name)?;
+        validate_secret_key(key)?;
+        if value.contains(['\n', '\r']) {
+            anyhow::bail!("secret value for {key} must be a single line");
+        }
+
+        // Secrets may be set before an app's first deploy, which creates the
+        // app directory. Only allow that for names that look like app names,
+        // so a misplaced KEY=VALUE or env-style key does not become an app.
+        if !self.app_dir(app_name).is_dir() && !is_new_app_name(app_name) {
+            anyhow::bail!(
+                "no app named '{app_name}' (usage: vela secret set <app> KEY=VALUE); \
+                 new app names must be lowercase letters, digits, '-', '_' or '.'"
+            );
+        }
+
         let mut secrets = self.load_secrets(app_name)?;
         secrets.insert(key.to_string(), value.to_string());
         self.save_secrets(app_name, &secrets)
     }
 
     pub fn get_secrets(&self, app_name: &str) -> Result<Vec<(String, String)>> {
+        validate_app_name(app_name)?;
         let secrets = self.load_secrets(app_name)?;
         let mut pairs: Vec<(String, String)> = secrets.into_iter().collect();
         pairs.sort_by(|a, b| a.0.cmp(&b.0));
@@ -267,6 +329,7 @@ impl ServerState {
     }
 
     pub fn remove_secret(&self, app_name: &str, key: &str) -> Result<bool> {
+        validate_app_name(app_name)?;
         let mut secrets = self.load_secrets(app_name)?;
         let removed = secrets.remove(key).is_some();
         if removed {
@@ -496,6 +559,47 @@ mod tests {
 
         let secrets = state.get_secrets("myapp").unwrap();
         assert_eq!(secrets.len(), 1);
+    }
+
+    #[test]
+    fn secret_before_first_deploy_is_allowed_for_app_like_names() {
+        let (_dir, state) = test_state();
+        state
+            .set_secret("cyanea", "SECRET_KEY_BASE", "abc")
+            .unwrap();
+        assert_eq!(state.get_secrets("cyanea").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn secret_without_app_name_does_not_create_app_dir() {
+        let (dir, state) = test_state();
+
+        // `_secret set KEY=VALUE <x>`: the pair lands in the app slot
+        assert!(state.set_secret("SECRET_KEY_BASE=abc", "X", "y").is_err());
+        // `secret set SECRET_KEY_BASE abc==`: base64 padding parses as a pair
+        assert!(state.set_secret("SECRET_KEY_BASE", "abc", "=").is_err());
+
+        let apps = std::fs::read_dir(dir.path().join("apps")).unwrap().count();
+        assert_eq!(apps, 0, "no stray app directory may be created");
+    }
+
+    #[test]
+    fn secrets_for_existing_app_keep_working_with_any_safe_name() {
+        let (dir, state) = test_state();
+        std::fs::create_dir_all(dir.path().join("apps").join("LegacyApp")).unwrap();
+        state.set_secret("LegacyApp", "API_KEY", "x").unwrap();
+    }
+
+    #[test]
+    fn secret_input_validation() {
+        let (_dir, state) = test_state();
+        assert!(state.set_secret("../etc", "API_KEY", "x").is_err());
+        assert!(state.set_secret("", "API_KEY", "x").is_err());
+        assert!(state.set_secret("myapp", "1KEY", "x").is_err());
+        assert!(state.set_secret("myapp", "MY-KEY", "x").is_err());
+        assert!(state.set_secret("myapp", "API_KEY", "a\nB=c").is_err());
+        assert!(state.get_secrets("../etc").is_err());
+        assert!(state.remove_secret("a/b", "API_KEY").is_err());
     }
 
     #[test]
